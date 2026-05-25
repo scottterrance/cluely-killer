@@ -43,6 +43,19 @@ def _prompt_for(settings: Settings, include_example: bool) -> str:
 
 
 def main() -> None:
+    # On Windows, force COM into STA on the main thread BEFORE creating
+    # QApplication. Some audio libs (soundcard / mediafoundation / comtypes)
+    # initialize COM as MTA on first import, which causes Qt's OleInitialize
+    # to fail with 0x80010106. Claiming STA here first avoids the conflict.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            COINIT_APARTMENTTHREADED = 0x2
+            # S_OK (0) on success, S_FALSE (1) if already STA, RPC_E_CHANGED_MODE on conflict.
+            ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+        except Exception:
+            pass
+
     load_dotenv()
     settings = load_settings()
     # If the user dropped a key in .env, prefer it on first run.

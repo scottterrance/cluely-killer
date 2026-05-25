@@ -6,6 +6,12 @@ and pushes mono 16 kHz float32 frames into a RollingAudioBuffer.
 
 Uses the `soundcard` library, which wraps WASAPI loopback on Windows
 without requiring a virtual cable.
+
+NOTE: `soundcard` initializes COM in MTA mode at import time, which
+conflicts with Qt's STA requirement on the main thread. We therefore
+import `soundcard` lazily inside the worker thread, so COM gets
+initialized on that thread's own apartment and the Qt main thread
+stays untouched.
 """
 from __future__ import annotations
 
@@ -13,7 +19,6 @@ import threading
 import traceback
 
 import numpy as np
-import soundcard as sc
 
 from .buffer import RollingAudioBuffer
 
@@ -53,6 +58,9 @@ class LoopbackCapture:
     # ------------------------------------------------------------------
     def _run(self) -> None:
         try:
+            # Lazy import: keeps COM initialization off the Qt main thread.
+            import soundcard as sc
+
             speaker = sc.default_speaker()
             mic = sc.get_microphone(str(speaker.name), include_loopback=True)
             with mic.recorder(samplerate=self.samplerate, channels=1, blocksize=self.blocksize) as rec:
