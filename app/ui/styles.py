@@ -1,12 +1,18 @@
-"""Qt stylesheet for the overlay. Dark, low-contrast on the chrome,
-high-contrast on the answer text so it stays readable at a glance.
+"""Qt stylesheet for the overlay.
+
+Solid (non-translucent) dark background. We rely on setWindowOpacity
+for the soft "see through" feel, NOT WA_TranslucentBackground, because
+the translucent attribute breaks frameless rendering on Win 11 24H2+.
 """
 
 APP_QSS = """
-#container {
-    background-color: rgba(15, 15, 22, 235);
+QWidget#OverlayRoot {
+    background-color: #0F0F16;
     border: 1px solid rgba(255, 255, 255, 30);
-    border-radius: 12px;
+}
+
+#container {
+    background-color: #0F0F16;
 }
 
 #status {

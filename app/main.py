@@ -46,6 +46,7 @@ def main() -> None:
     # ----- Debug CLI flags -----
     no_stealth = "--no-stealth" in sys.argv
     reset_window = "--reset-window" in sys.argv
+    simple_mode = "--simple" in sys.argv
 
     # On Windows, force COM into STA on the main thread BEFORE creating
     # QApplication. Some audio libs (soundcard / mediafoundation / comtypes)
@@ -69,6 +70,8 @@ def main() -> None:
         settings.window_x = -1
         settings.window_y = -1
         print("[startup] --reset-window: forcing center of primary screen.")
+    if simple_mode:
+        print("[startup] --simple: using a normal titled window.")
     # If the user dropped a key in .env, prefer it on first run.
     env_key = os.getenv("GROQ_API_KEY", "").strip()
     if env_key and not settings.groq_api_key:
@@ -120,7 +123,12 @@ def main() -> None:
             overlay.refresh_footer()
             apply_hotkeys()
 
-    overlay = OverlayWindow(settings, controller, on_open_settings=open_settings_dialog)
+    overlay = OverlayWindow(
+        settings,
+        controller,
+        on_open_settings=open_settings_dialog,
+        simple_mode=simple_mode,
+    )
     overlay.show()
     overlay.place_on_screen()
 

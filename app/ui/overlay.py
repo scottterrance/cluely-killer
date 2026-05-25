@@ -2,6 +2,19 @@
 
 Renders the LLM stream as it arrives. **bold** is converted to <b>
 on every chunk so keyword highlighting appears live.
+
+Window flags:
+  - FramelessWindowHint     : no title bar (we draw our own header)
+  - WindowStaysOnTopHint    : always above the meeting window
+  - NO WA_TranslucentBackground: this attribute combined with frameless
+    causes the window to render zero pixels on Windows 11 24H2 (build
+    26100+) under newer DWM compositors. We use a solid dark background
+    instead. Stealth-via-WDA_EXCLUDEFROMCAPTURE still works without it.
+  - NO Qt.WindowType.Tool   : keeping the window in the taskbar makes it
+    findable if it ever ends up off-screen. Stealth users can opt it
+    back via Settings later if desired.
+
+Pass simple_mode=True for a fully-normal titled window (debug fallback).
 """
 from __future__ import annotations
 
@@ -24,8 +37,6 @@ from ..config import Settings
 from ..core.controller import Controller
 from .styles import APP_QSS
 
-# Minimal, fast markdown -> HTML for streamed content.
-# Only handles **bold** + line breaks because that's all the prompt allows.
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
 
 
@@ -45,11 +56,13 @@ class OverlayWindow(QWidget):
         settings: Settings,
         controller: Controller,
         on_open_settings: Callable[[], None],
+        simple_mode: bool = False,
     ):
         super().__init__()
         self.settings = settings
         self.controller = controller
         self.on_open_settings = on_open_settings
+        self.simple_mode = simple_mode
         self._answer_text = ""
         self._drag_offset = None
 
@@ -59,12 +72,18 @@ class OverlayWindow(QWidget):
 
     # ------------------------------------------------------------------
     def _setup_window(self) -> None:
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool  # no taskbar icon, no Alt+Tab
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setObjectName("OverlayRoot")
+        if self.simple_mode:
+            # Plain decorated window — guaranteed visible everywhere.
+            self.setWindowTitle("cluely-killer")
+            self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+        # NO WA_TranslucentBackground: it interacts badly with Qt6 +
+        # frameless on Windows 11 24H2 and produces a 0-pixel window.
         self.setWindowOpacity(self.settings.opacity)
         self.setMinimumSize(420, 240)
         self.resize(
@@ -73,9 +92,8 @@ class OverlayWindow(QWidget):
         )
 
     def place_on_screen(self) -> None:
-        """Position the overlay. If we have a saved geometry that lies on
-        any currently-attached screen, restore it. Otherwise center on the
-        primary screen. Always called *after* show().
+        """Center on the primary screen, or restore last position if it lies
+        on a currently-attached monitor. Always called *after* show().
         """
         from PyQt6.QtGui import QGuiApplication
 
@@ -97,15 +115,14 @@ class OverlayWindow(QWidget):
         self.move(*target)
         self.raise_()
         self.activateWindow()
-        # Print so the user can verify where the window actually is.
         print(
             f"[overlay] placed at x={self.x()} y={self.y()} "
             f"size={self.width()}x{self.height()} "
-            f"on a {len(screens)}-screen setup."
+            f"on a {len(screens)}-screen setup. "
+            f"simple_mode={self.simple_mode}."
         )
 
     def closeEvent(self, e):  # noqa: N802 (Qt API)
-        # Persist last position so a restart doesn't strand the window.
         self.settings.window_x = self.x()
         self.settings.window_y = self.y()
         self.settings.window_w = self.width()
@@ -131,14 +148,14 @@ class OverlayWindow(QWidget):
         header.addWidget(self.status_label)
         header.addStretch()
 
-        self.settings_btn = QPushButton("\u2699")  # gear
+        self.settings_btn = QPushButton("\u2699")
         self.settings_btn.setObjectName("iconBtn")
         self.settings_btn.setFixedSize(26, 26)
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.clicked.connect(lambda: self.on_open_settings())
         header.addWidget(self.settings_btn)
 
-        self.hide_btn = QPushButton("\u2013")  # en-dash for hide
+        self.hide_btn = QPushButton("\u2013")
         self.hide_btn.setObjectName("iconBtn")
         self.hide_btn.setFixedSize(26, 26)
         self.hide_btn.setToolTip("Hide")
@@ -147,21 +164,18 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
-        # --- Question (transcript) ---
         self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
         self.question_label.setMaximumHeight(60)
         v.addWidget(self.question_label)
 
-        # --- Answer ---
         self.answer_view = QTextBrowser()
         self.answer_view.setObjectName("answer")
         self.answer_view.setOpenExternalLinks(False)
         self.answer_view.setFrameShape(QFrame.Shape.NoFrame)
         v.addWidget(self.answer_view, stretch=1)
 
-        # --- Footer ---
         self.footer = QLabel(self._footer_text())
         self.footer.setObjectName("footer")
         v.addWidget(self.footer)
@@ -170,9 +184,9 @@ class OverlayWindow(QWidget):
 
     def _footer_text(self) -> str:
         return (
-            f"{self.settings.hotkey_answer} answer  ·  "
-            f"{self.settings.hotkey_toggle} hide  ·  "
-            f"{self.settings.hotkey_clear} clear  ·  "
+            f"{self.settings.hotkey_answer} answer  \u00b7  "
+            f"{self.settings.hotkey_toggle} hide  \u00b7  "
+            f"{self.settings.hotkey_clear} clear  \u00b7  "
             f"{self.settings.hotkey_settings} settings"
         )
 
@@ -191,7 +205,6 @@ class OverlayWindow(QWidget):
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
-        # Trim very long transcripts so they don't push the answer down.
         display = text if len(text) <= 220 else "..." + text[-220:]
         self.question_label.setText(f"Q: {display}")
 
@@ -222,13 +235,17 @@ class OverlayWindow(QWidget):
         self.status_label.setText(msg)
 
     # ------------------------------------------------------------------
-    # Window dragging (no title bar)
+    # Custom drag (only meaningful in frameless mode; harmless otherwise)
     def mousePressEvent(self, e):
+        if self.simple_mode:
+            return super().mousePressEvent(e)
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
             e.accept()
 
     def mouseMoveEvent(self, e):
+        if self.simple_mode:
+            return super().mouseMoveEvent(e)
         if self._drag_offset is not None and e.buttons() & Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_offset)
             e.accept()
