@@ -129,10 +129,12 @@ class SettingsDialog(QDialog):
         self.hk_toggle = QLineEdit(self.settings.hotkey_toggle)
         self.hk_clear = QLineEdit(self.settings.hotkey_clear)
         self.hk_settings = QLineEdit(self.settings.hotkey_settings)
+        self.hk_quit = QLineEdit(self.settings.hotkey_quit)
         f.addRow("Answer:", self.hk_answer)
         f.addRow("Toggle overlay:", self.hk_toggle)
         f.addRow("Clear buffer:", self.hk_clear)
         f.addRow("Open settings:", self.hk_settings)
+        f.addRow("Quit app:", self.hk_quit)
         f.addRow(
             QLabel(
                 "<i>pynput syntax — e.g. &lt;ctrl&gt;+&lt;space&gt;, "
@@ -180,6 +182,7 @@ class SettingsDialog(QDialog):
         s.hotkey_toggle = self.hk_toggle.text().strip()
         s.hotkey_clear = self.hk_clear.text().strip()
         s.hotkey_settings = self.hk_settings.text().strip()
+        s.hotkey_quit = self.hk_quit.text().strip()
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())

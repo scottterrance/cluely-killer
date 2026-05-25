@@ -74,11 +74,28 @@ def main() -> None:
         _say("loaded GROQ_API_KEY from .env")
 
     _say("creating QApplication...")
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
+    from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("cluely-killer")
+
+    # Make Ctrl+C in the terminal actually quit the app. Qt's C++ event
+    # loop blocks Python signal delivery; the QTimer below wakes Python
+    # every 200 ms so the SIGINT handler can run.
+    import signal
+
+    def _on_sigint(*_args):
+        print("\n[shutdown] Ctrl+C received, quitting...", flush=True)
+        QApplication.instance().quit()
+
+    signal.signal(signal.SIGINT, _on_sigint)
+    _signal_kick = QTimer()
+    _signal_kick.start(200)
+    _signal_kick.timeout.connect(lambda: None)
+
     _say("QApplication created.")
 
     # ---- Audio pipeline (always on) ----
@@ -162,6 +179,7 @@ def main() -> None:
         settings,
         controller,
         on_open_settings=open_settings_dialog,
+        on_quit=lambda: app.quit(),
         simple_mode=simple_mode,
     )
     _say("overlay constructed; calling show()...")
@@ -189,10 +207,49 @@ def main() -> None:
             settings.hotkey_toggle: lambda: overlay.toggle_visibility(),
             settings.hotkey_clear: lambda: controller.clear(),
             settings.hotkey_settings: lambda: open_settings_dialog(),
+            settings.hotkey_quit: lambda: app.quit(),
         })
 
     apply_hotkeys()
     _say("hotkeys registered.")
+
+    # ---- System tray icon ----
+    # Even when the overlay is hidden, the tray icon stays so the user can
+    # toggle it back, open settings, or quit cleanly.
+    def _make_tray_icon() -> QIcon:
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QBrush(QColor("#7CC8FF")))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(6, 6, 52, 52)
+        p.setPen(QColor("#0F0F16"))
+        f = QFont(); f.setPointSize(28); f.setBold(True); p.setFont(f)
+        p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "C")
+        p.end()
+        return QIcon(pix)
+
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray = QSystemTrayIcon(_make_tray_icon())
+        tray.setToolTip("cluely-killer")
+        tray_menu = QMenu()
+        tray_menu.addAction("Show / hide overlay", overlay.toggle_visibility)
+        tray_menu.addAction("Settings...", open_settings_dialog)
+        tray_menu.addSeparator()
+        tray_menu.addAction("Quit", app.quit)
+        tray.setContextMenu(tray_menu)
+
+        def _on_tray_activated(reason):
+            if reason == QSystemTrayIcon.ActivationReason.Trigger:
+                overlay.toggle_visibility()
+
+        tray.activated.connect(_on_tray_activated)
+        tray.show()
+        _say("system tray icon added.")
+    else:
+        _say("system tray not available on this platform.")
 
     if capture.last_error:
         controller.error.emit(f"Audio: {capture.last_error}")

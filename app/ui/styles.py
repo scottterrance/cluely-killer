@@ -62,6 +62,11 @@ QWidget#OverlayRoot {
     color: white;
 }
 
+#iconBtn[text="\u00d7"]:hover {
+    background-color: rgba(232, 80, 80, 80);
+    color: white;
+}
+
 QDialog {
     background-color: #1a1d24;
     color: #e6e9ef;

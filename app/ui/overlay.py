@@ -56,12 +56,14 @@ class OverlayWindow(QWidget):
         settings: Settings,
         controller: Controller,
         on_open_settings: Callable[[], None],
+        on_quit: Callable[[], None],
         simple_mode: bool = False,
     ):
         super().__init__()
         self.settings = settings
         self.controller = controller
         self.on_open_settings = on_open_settings
+        self.on_quit = on_quit
         self.simple_mode = simple_mode
         self._answer_text = ""
         self._drag_offset = None
@@ -158,9 +160,16 @@ class OverlayWindow(QWidget):
         self.hide_btn = QPushButton("\u2013")
         self.hide_btn.setObjectName("iconBtn")
         self.hide_btn.setFixedSize(26, 26)
-        self.hide_btn.setToolTip("Hide")
+        self.hide_btn.setToolTip("Hide (still running in tray)")
         self.hide_btn.clicked.connect(self.hide)
         header.addWidget(self.hide_btn)
+
+        self.quit_btn = QPushButton("\u00d7")  # ×
+        self.quit_btn.setObjectName("iconBtn")
+        self.quit_btn.setFixedSize(26, 26)
+        self.quit_btn.setToolTip("Quit cluely-killer")
+        self.quit_btn.clicked.connect(lambda: self.on_quit())
+        header.addWidget(self.quit_btn)
 
         v.addLayout(header)
 
@@ -187,7 +196,8 @@ class OverlayWindow(QWidget):
             f"{self.settings.hotkey_answer} answer  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
             f"{self.settings.hotkey_clear} clear  \u00b7  "
-            f"{self.settings.hotkey_settings} settings"
+            f"{self.settings.hotkey_settings} settings  \u00b7  "
+            f"{self.settings.hotkey_quit} quit"
         )
 
     def refresh_footer(self) -> None:

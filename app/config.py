@@ -42,6 +42,7 @@ class Settings:
     hotkey_toggle: str = "<ctrl>+\\"
     hotkey_clear: str = "<ctrl>+r"
     hotkey_settings: str = "<ctrl>+<shift>+s"
+    hotkey_quit: str = "<ctrl>+<shift>+q"
 
     # ---- User context (injected into system prompt) ----
     about_me: str = ""
