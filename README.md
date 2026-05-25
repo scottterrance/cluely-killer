@@ -52,9 +52,15 @@ cluely-killer/
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
+pip uninstall hf-xet -y      # avoid Rust downloader crashes on VMs
 copy .env.example .env       # then paste your Groq key
 python run.py
 ```
+
+> The `pip uninstall hf-xet` step is only required on Windows VMs / hypervisor
+> CPUs where Hugging Face's Rust download accelerator crashes with
+> `STATUS_ILLEGAL_INSTRUCTION (0xc000001d)`. The app also sets
+> `HF_HUB_DISABLE_XET=1` defensively, but uninstalling guarantees it.
 
 Default hotkeys:
 

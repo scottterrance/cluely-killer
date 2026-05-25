@@ -9,6 +9,20 @@ Run from the project root:
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# CRITICAL: disable Hugging Face's native Rust accelerators BEFORE anything
+# else loads them. `hf_xet` is a Rust chunked downloader bundled with
+# huggingface_hub for performance; on hypervisor / virtualized CPUs that
+# don't expose modern SIMD features it crashes with STATUS_ILLEGAL_INSTRUCTION
+# (0xc000001d) the moment it tries to fetch a file. Forcing HF Hub to use
+# the plain-Python HTTP path keeps downloads slower-but-safe everywhere.
+# Belt-and-suspenders: also `pip uninstall hf-xet -y`.
+# ---------------------------------------------------------------------------
+import os
+
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
 import faulthandler
 import sys
 import traceback
