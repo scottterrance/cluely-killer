@@ -16,11 +16,22 @@ def _say(msg: str) -> None:
     print(f"[startup] {msg}", flush=True)
 
 
+def _argv_value(name: str) -> str | None:
+    """Return value for --name VAL or --name=VAL, or None."""
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith(f"{name}="):
+            return arg.split("=", 1)[1]
+        if arg == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return None
+
+
 def main() -> None:
     # ----- Debug CLI flags -----
     no_stealth = "--no-stealth" in sys.argv
     reset_window = "--reset-window" in sys.argv
     simple_mode = "--simple" in sys.argv
+    whisper_override = _argv_value("--whisper-model")
 
     _say(f"argv = {sys.argv}")
     _say(f"python = {sys.version.split()[0]}  exe = {sys.executable}")
@@ -53,6 +64,9 @@ def main() -> None:
         _say("--reset-window: forcing center of primary screen.")
     if simple_mode:
         _say("--simple: using a normal titled window.")
+    if whisper_override:
+        _say(f"--whisper-model: overriding to '{whisper_override}' for this session.")
+        settings.whisper_model = whisper_override
     env_key = os.getenv("GROQ_API_KEY", "").strip()
     if env_key and not settings.groq_api_key:
         settings.groq_api_key = env_key

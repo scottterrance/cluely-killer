@@ -2,15 +2,24 @@
 
 Run from the project root:
     python run.py
-    python run.py --simple        # normal titled window
-    python run.py --no-stealth    # disable WDA_EXCLUDEFROMCAPTURE
-    python run.py --reset-window  # ignore saved position
+    python run.py --simple                  # normal titled window
+    python run.py --no-stealth              # disable WDA_EXCLUDEFROMCAPTURE
+    python run.py --reset-window            # ignore saved position
+    python run.py --whisper-model tiny      # try a smaller model
 """
 from __future__ import annotations
 
+import faulthandler
 import sys
 import traceback
 from pathlib import Path
+
+# faulthandler catches NATIVE crashes (segfault, illegal instruction,
+# abort) that ordinary Python try/except cannot. Without it,
+# ctranslate2 / numpy / torch crashes look like the process silently
+# evaporated. With it, we get a Python-level stack trace pointing at
+# the exact line where the C++ code died.
+faulthandler.enable()
 
 # Disable Python's stdout/stderr buffering so we see every print() the
 # instant it happens. PowerShell can buffer aggressively otherwise.
