@@ -74,9 +74,24 @@ def main() -> None:
         _say("loaded GROQ_API_KEY from .env")
 
     _say("creating QApplication...")
-    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
     from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+    # ----- Cross-thread bridge for hotkeys -----
+    # pynput's GlobalHotKeys runs callbacks on its OWN listener thread.
+    # Calling Qt UI methods (open dialog, show/hide window, ...) from a
+    # non-GUI thread is undefined behavior and was causing the app to
+    # freeze after a few hotkey presses. We route every hotkey through
+    # this QObject's signals; because the QObject lives on the main
+    # thread, Qt automatically uses a queued connection and the actual
+    # handlers run on the GUI thread where they belong.
+    class HotkeyDispatcher(QObject):
+        answer_requested = pyqtSignal()
+        toggle_requested = pyqtSignal()
+        clear_requested = pyqtSignal()
+        settings_requested = pyqtSignal()
+        quit_requested = pyqtSignal()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -200,14 +215,27 @@ def main() -> None:
     else:
         _say("stealth OFF: window is visible to screen-capture too.")
 
-    # ---- Hotkeys ----
+    # ---- Hotkeys (with cross-thread marshalling) ----
+    dispatcher = HotkeyDispatcher()
+    # Force QueuedConnection on every link so no slot ever runs on the
+    # pynput listener thread — even for plain Python callables where
+    # Qt's auto-detection can pick DirectConnection.
+    qc = Qt.ConnectionType.QueuedConnection
+    dispatcher.answer_requested.connect(controller.trigger_answer, qc)
+    dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
+    dispatcher.clear_requested.connect(controller.clear, qc)
+    dispatcher.settings_requested.connect(open_settings_dialog, qc)
+    dispatcher.quit_requested.connect(app.quit, qc)
+
     def apply_hotkeys() -> None:
+        # Bind hotkeys to signal.emit (thread-safe) instead of direct
+        # callables that touch the UI.
         hotkeys.set_hotkeys({
-            settings.hotkey_answer: lambda: controller.trigger_answer(),
-            settings.hotkey_toggle: lambda: overlay.toggle_visibility(),
-            settings.hotkey_clear: lambda: controller.clear(),
-            settings.hotkey_settings: lambda: open_settings_dialog(),
-            settings.hotkey_quit: lambda: app.quit(),
+            settings.hotkey_answer: dispatcher.answer_requested.emit,
+            settings.hotkey_toggle: dispatcher.toggle_requested.emit,
+            settings.hotkey_clear: dispatcher.clear_requested.emit,
+            settings.hotkey_settings: dispatcher.settings_requested.emit,
+            settings.hotkey_quit: dispatcher.quit_requested.emit,
         })
 
     apply_hotkeys()
