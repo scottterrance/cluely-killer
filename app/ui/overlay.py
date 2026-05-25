@@ -66,7 +66,51 @@ class OverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowOpacity(self.settings.opacity)
-        self.resize(580, 360)
+        self.setMinimumSize(420, 240)
+        self.resize(
+            max(self.settings.window_w, 420),
+            max(self.settings.window_h, 240),
+        )
+
+    def place_on_screen(self) -> None:
+        """Position the overlay. If we have a saved geometry that lies on
+        any currently-attached screen, restore it. Otherwise center on the
+        primary screen. Always called *after* show().
+        """
+        from PyQt6.QtGui import QGuiApplication
+
+        screens = QGuiApplication.screens()
+        target = None
+        sx, sy = self.settings.window_x, self.settings.window_y
+        if sx >= 0 and sy >= 0:
+            for s in screens:
+                g = s.geometry()
+                if g.contains(sx + 20, sy + 20):
+                    target = (sx, sy)
+                    break
+        if target is None:
+            primary = QGuiApplication.primaryScreen().availableGeometry()
+            target = (
+                primary.x() + (primary.width() - self.width()) // 2,
+                primary.y() + (primary.height() - self.height()) // 3,
+            )
+        self.move(*target)
+        self.raise_()
+        self.activateWindow()
+        # Print so the user can verify where the window actually is.
+        print(
+            f"[overlay] placed at x={self.x()} y={self.y()} "
+            f"size={self.width()}x{self.height()} "
+            f"on a {len(screens)}-screen setup."
+        )
+
+    def closeEvent(self, e):  # noqa: N802 (Qt API)
+        # Persist last position so a restart doesn't strand the window.
+        self.settings.window_x = self.x()
+        self.settings.window_y = self.y()
+        self.settings.window_w = self.width()
+        self.settings.window_h = self.height()
+        super().closeEvent(e)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)

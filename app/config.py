@@ -50,8 +50,17 @@ class Settings:
     custom_system_prompt: str = ""
 
     # ---- Window / stealth ----
-    exclude_from_capture: bool = True
-    opacity: float = 0.92
+    # WDA_EXCLUDEFROMCAPTURE has known interactions with RDP / virtual
+    # desktops / certain GPU drivers where the window becomes invisible
+    # to the local user too. Default OFF; flip on from Settings once you've
+    # confirmed the window renders for you.
+    exclude_from_capture: bool = False
+    opacity: float = 0.95
+    # Last known on-screen geometry; refreshed on close. -1 = "not set yet".
+    window_x: int = -1
+    window_y: int = -1
+    window_w: int = 580
+    window_h: int = 360
 
 
 def load_settings() -> Settings:

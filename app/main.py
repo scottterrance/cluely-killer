@@ -43,6 +43,10 @@ def _prompt_for(settings: Settings, include_example: bool) -> str:
 
 
 def main() -> None:
+    # ----- Debug CLI flags -----
+    no_stealth = "--no-stealth" in sys.argv
+    reset_window = "--reset-window" in sys.argv
+
     # On Windows, force COM into STA on the main thread BEFORE creating
     # QApplication. Some audio libs (soundcard / mediafoundation / comtypes)
     # initialize COM as MTA on first import, which causes Qt's OleInitialize
@@ -58,6 +62,13 @@ def main() -> None:
 
     load_dotenv()
     settings = load_settings()
+    if no_stealth:
+        settings.exclude_from_capture = False
+        print("[startup] --no-stealth: WDA_EXCLUDEFROMCAPTURE will NOT be applied this session.")
+    if reset_window:
+        settings.window_x = -1
+        settings.window_y = -1
+        print("[startup] --reset-window: forcing center of primary screen.")
     # If the user dropped a key in .env, prefer it on first run.
     env_key = os.getenv("GROQ_API_KEY", "").strip()
     if env_key and not settings.groq_api_key:
@@ -111,12 +122,21 @@ def main() -> None:
 
     overlay = OverlayWindow(settings, controller, on_open_settings=open_settings_dialog)
     overlay.show()
+    overlay.place_on_screen()
 
     # Stealth must happen AFTER show() so the HWND is valid.
     if settings.exclude_from_capture:
         ok = exclude_window_from_capture(int(overlay.winId()), True)
         if not ok and sys.platform == "win32":
             print("[startup] WDA_EXCLUDEFROMCAPTURE failed — needs Windows 10 build 19041+.")
+        else:
+            print(
+                "[startup] stealth ON: window is hidden from screen-capture APIs. "
+                "If you can't see it locally either (RDP / VM / cloned display), "
+                "run with --no-stealth or turn it off in Settings."
+            )
+    else:
+        print("[startup] stealth OFF: window is visible to screen-capture too.")
 
     # ---- Hotkeys ----
     def apply_hotkeys() -> None:
