@@ -25,23 +25,31 @@ def _friendly_error(exc: BaseException) -> str:
     cls = type(exc).__name__
     msg = str(exc)
     low = msg.lower()
-    # Groq / OpenAI-compatible HTTP errors put the status code in the message,
-    # e.g. "Error code: 403 - {...}".
-    if "403" in msg or cls == "PermissionDeniedError" or "access denied" in low:
+    # DNS / hostname resolution failures FIRST - the underlying httpx
+    # ConnectError doesn't contain the word "connection" so it would
+    # otherwise fall through to the generic formatter.
+    if (
+        "getaddrinfo" in low
+        or "name resolution" in low
+        or "11001" in msg
+    ):
         return (
-            "Provider blocked your IP (HTTP 403). Many cloud / VPS IP ranges "
-            "are blocked by Groq's WAF. Open Settings -> AI Provider and "
-            "switch to 'ollama' (local model)."
+            "DNS lookup failed - cannot reach api.deepseek.com. "
+            "Check your WiFi / corporate firewall."
         )
+    if "403" in msg or cls == "PermissionDeniedError" or "access denied" in low:
+        return "DeepSeek blocked the request (HTTP 403). Check your API key in Settings."
     if "401" in msg or cls == "AuthenticationError" or "invalid api key" in low:
         return "API key is invalid or revoked. Check Settings -> AI Provider."
     if "429" in msg or cls == "RateLimitError" or "rate limit" in low:
-        return "Rate limit hit. Wait a minute, or switch provider in Settings."
-    if cls in ("APIConnectionError", "ConnectionError") or "connection" in low:
-        return "Network error reaching the LLM. Check your connection."
-    # Ollama-specific: model not pulled yet
-    if "model" in low and ("not found" in low or "404" in msg):
-        return "Model not found. For Ollama, run e.g.  ollama pull llama3.1:8b"
+        return "DeepSeek rate limit hit. Wait a minute and try again."
+    if (
+        cls in ("APIConnectionError", "ConnectionError", "ConnectError",
+                "ConnectTimeout", "ReadTimeout", "TimeoutException")
+        or "connection" in low
+        or "timed out" in low
+    ):
+        return "Network error reaching DeepSeek. Check your internet."
     return f"{cls}: {msg}"[:200]
 
 
@@ -111,7 +119,7 @@ class Controller(QObject):
             llm = self.llm_factory(self.settings)
             prior = self.history.as_messages()
             print(
-                f"[answer] provider={self.settings.provider} "
+                f"[answer] provider=deepseek "
                 f"history_turns={len(prior)//2}",
                 flush=True,
             )

@@ -1,10 +1,7 @@
 """Application bootstrap.
 
-Wires together: settings -> audio capture -> Whisper -> LLM factory ->
+Wires together: settings -> audio capture -> Whisper -> DeepSeek ->
 controller -> overlay -> hotkeys -> stealth.
-
-Heavily-instrumented startup: every step prints a flushed marker so a
-silent crash leaves an obvious last-known-good line in the terminal.
 """
 from __future__ import annotations
 
@@ -16,22 +13,10 @@ def _say(msg: str) -> None:
     print(f"[startup] {msg}", flush=True)
 
 
-def _argv_value(name: str) -> str | None:
-    """Return value for --name VAL or --name=VAL, or None."""
-    for i, arg in enumerate(sys.argv):
-        if arg.startswith(f"{name}="):
-            return arg.split("=", 1)[1]
-        if arg == name and i + 1 < len(sys.argv):
-            return sys.argv[i + 1]
-    return None
-
-
 def main() -> None:
-    # ----- Debug CLI flags -----
     no_stealth = "--no-stealth" in sys.argv
     reset_window = "--reset-window" in sys.argv
     simple_mode = "--simple" in sys.argv
-    whisper_override = _argv_value("--whisper-model")
 
     _say(f"argv = {sys.argv}")
     _say(f"python = {sys.version.split()[0]}  exe = {sys.executable}")
@@ -64,25 +49,14 @@ def main() -> None:
         _say("--reset-window: forcing center of primary screen.")
     if simple_mode:
         _say("--simple: using a normal titled window.")
-    if whisper_override:
-        _say(f"--whisper-model: overriding to '{whisper_override}' for this session.")
-        settings.whisper_model = whisper_override
-    env_key = os.getenv("GROQ_API_KEY", "").strip()
-    if env_key and not settings.groq_api_key:
-        settings.groq_api_key = env_key
-        save_settings(settings)
-        _say("loaded GROQ_API_KEY from .env")
-    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if or_key and not settings.openrouter_api_key:
-        settings.openrouter_api_key = or_key
-        save_settings(settings)
-        _say("loaded OPENROUTER_API_KEY from .env")
+
+    # DeepSeek key from .env if present (only loaded if user hasn't
+    # already entered one in Settings).
     ds_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if ds_key and not settings.deepseek_api_key:
         settings.deepseek_api_key = ds_key
         save_settings(settings)
         _say("loaded DEEPSEEK_API_KEY from .env")
-    # Optional .env overrides for a custom DeepSeek endpoint / model.
     ds_base = os.getenv("DEEPSEEK_BASE_URL", "").strip()
     if ds_base:
         settings.deepseek_base_url = ds_base
@@ -97,14 +71,6 @@ def main() -> None:
     from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPixmap
     from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-    # ----- Cross-thread bridge for hotkeys -----
-    # pynput's GlobalHotKeys runs callbacks on its OWN listener thread.
-    # Calling Qt UI methods (open dialog, show/hide window, ...) from a
-    # non-GUI thread is undefined behavior and was causing the app to
-    # freeze after a few hotkey presses. We route every hotkey through
-    # this QObject's signals; because the QObject lives on the main
-    # thread, Qt automatically uses a queued connection and the actual
-    # handlers run on the GUI thread where they belong.
     class HotkeyDispatcher(QObject):
         answer_requested = pyqtSignal()
         toggle_requested = pyqtSignal()
@@ -116,9 +82,6 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("cluely-killer")
 
-    # Make Ctrl+C in the terminal actually quit the app. Qt's C++ event
-    # loop blocks Python signal delivery; the QTimer below wakes Python
-    # every 200 ms so the SIGINT handler can run.
     import signal
 
     def _on_sigint(*_args):
@@ -142,13 +105,12 @@ def main() -> None:
     capture.start()
     _say("audio capture started.")
 
-    # ---- STT ----
+    # ---- STT (bundled 'small' model, offline) ----
     _say(
         f"loading faster-whisper '{settings.whisper_model}' "
-        f"({settings.whisper_compute} on {settings.whisper_device})..."
+        f"({settings.whisper_compute} on {settings.whisper_device}) "
+        f"from bundled cache..."
     )
-    _say("FIRST RUN downloads ~466 MB from Hugging Face. Wait 2-5 min.")
-    _say("Do NOT press Ctrl+C during this step.")
     from .stt.whisper_engine import WhisperEngine
 
     whisper = WhisperEngine(
@@ -165,26 +127,17 @@ def main() -> None:
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
-    from .llm.groq_provider import GroqProvider
-    from .llm.ollama_provider import OllamaProvider
-    from .llm.openrouter_provider import OpenRouterProvider
     from .prompts.builder import ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
 
     def _llm_factory(s) -> LLMProvider:
-        if s.provider == "ollama":
-            return OllamaProvider(model=s.ollama_model, host=s.ollama_host)
-        if s.provider == "openrouter":
-            return OpenRouterProvider(api_key=s.openrouter_api_key, model=s.openrouter_model)
-        if s.provider == "deepseek":
-            return DeepSeekProvider(
-                api_key=s.deepseek_api_key,
-                model=s.deepseek_model,
-                base_url=s.deepseek_base_url,
-            )
-        return GroqProvider(api_key=s.groq_api_key, model=s.groq_model)
+        return DeepSeekProvider(
+            api_key=s.deepseek_api_key,
+            model=s.deepseek_model,
+            base_url=s.deepseek_base_url,
+        )
 
     def _prompt_for(s, include_example: bool) -> str:
         return build_system_prompt(
@@ -221,9 +174,6 @@ def main() -> None:
             ok = exclude_window_from_capture(
                 int(overlay.winId()), settings.exclude_from_capture
             )
-            # If the user toggled stealth ON but the OS rejected it,
-            # treat it as visible for the badge so they aren't lulled
-            # into a false sense of security.
             overlay.update_stealth_badge(settings.exclude_from_capture and ok)
             overlay.refresh_footer()
             apply_hotkeys()
@@ -240,7 +190,6 @@ def main() -> None:
     _say("overlay.show() returned; placing on screen...")
     overlay.place_on_screen()
 
-    # Stealth must happen AFTER show() so the HWND is valid.
     stealth_active = False
     if settings.exclude_from_capture:
         ok = exclude_window_from_capture(int(overlay.winId()), True)
@@ -258,9 +207,6 @@ def main() -> None:
 
     # ---- Hotkeys (with cross-thread marshalling) ----
     dispatcher = HotkeyDispatcher()
-    # Force QueuedConnection on every link so no slot ever runs on the
-    # pynput listener thread — even for plain Python callables where
-    # Qt's auto-detection can pick DirectConnection.
     qc = Qt.ConnectionType.QueuedConnection
     dispatcher.answer_requested.connect(controller.trigger_answer, qc)
     dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
@@ -269,8 +215,6 @@ def main() -> None:
     dispatcher.quit_requested.connect(app.quit, qc)
 
     def apply_hotkeys() -> None:
-        # Bind hotkeys to signal.emit (thread-safe) instead of direct
-        # callables that touch the UI.
         hotkeys.set_hotkeys({
             settings.hotkey_answer: dispatcher.answer_requested.emit,
             settings.hotkey_toggle: dispatcher.toggle_requested.emit,
@@ -283,8 +227,6 @@ def main() -> None:
     _say("hotkeys registered.")
 
     # ---- System tray icon ----
-    # Even when the overlay is hidden, the tray icon stays so the user can
-    # toggle it back, open settings, or quit cleanly.
     def _make_tray_icon() -> QIcon:
         pix = QPixmap(64, 64)
         pix.fill(Qt.GlobalColor.transparent)

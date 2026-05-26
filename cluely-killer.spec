@@ -6,18 +6,19 @@
 # Output: dist/cluely-killer/cluely-killer.exe  (one-folder bundle).
 # To distribute, zip the entire dist/cluely-killer/ folder.
 #
-# Whisper model files are NOT bundled (they're 466+ MB and would fail
-# legal redistribution policies). They download to ~/.cache/huggingface
-# on first run, same as in dev.
+# THIS BUILD BUNDLES THE WHISPER 'small' MODEL.
+# Before running build.bat, populate ./models/hf-cache/hub/ with the
+# Whisper small model (run setup-model.ps1 once - it copies from your
+# existing HF cache). The spec walks ./models/ and ships every file
+# next to the .exe so the friend's machine never downloads anything.
+# Final dist size: ~750 MB (250 MB app + 466 MB model).
 
 # ruff: noqa
+import os
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 # ---- Native-binary libs that PyInstaller can miss ----
-# faster-whisper bundles tokenizer assets next to its package; ctranslate2
-# ships the actual inference DLLs; soundcard loads its mediafoundation
-# backend dynamically on Windows.
 fwhisper_data    = collect_data_files("faster_whisper")
 ct2_data         = collect_data_files("ctranslate2")
 soundcard_data   = collect_data_files("soundcard")
@@ -26,29 +27,38 @@ fwhisper_hidden  = collect_submodules("faster_whisper")
 ct2_hidden       = collect_submodules("ctranslate2")
 soundcard_hidden = collect_submodules("soundcard")
 
-# Lazy-imported inside app/utils/extract.py - PyInstaller won't see them
-# during static analysis, so list them explicitly.
+# Lazy-imported inside app/utils/extract.py - PyInstaller won't see them.
 lazy_hidden = [
     "pypdf",
     "docx",
-    "lxml",       # pulled in by python-docx
+    "lxml",
     "lxml.etree",
 ]
 
-# Modules we definitely don't ship - shaves ~30 MB off the bundle.
+# Walk ./models/ and emit a (src, dst) tuple per file. The destination
+# path is relative to the .exe's folder, so models/ ends up next to
+# cluely-killer.exe in the dist folder. run.py points HF cache at that
+# location.
+def _bundle_models():
+    out = []
+    if not os.path.isdir("models"):
+        print("[spec] WARNING: ./models/ not found - the .exe will not have a")
+        print("[spec]          bundled model and will fail at startup. Run")
+        print("[spec]          setup-model.ps1 first to populate ./models/.")
+        return out
+    for root, _dirs, files in os.walk("models"):
+        for f in files:
+            src = os.path.join(root, f)
+            dst = os.path.dirname(src)  # preserves models/.../ structure
+            out.append((src, dst))
+    print(f"[spec] bundling {len(out)} model files from ./models/")
+    return out
+
+
 excludes = [
-    "tkinter",
-    "matplotlib",
-    "scipy",
-    "pandas",
-    "PIL",
-    "PySide2",
-    "PySide6",
-    "PyQt5",
-    "test",
-    "tests",
-    "pytest",
-    "unittest",
+    "tkinter", "matplotlib", "scipy", "pandas", "PIL",
+    "PySide2", "PySide6", "PyQt5",
+    "test", "tests", "pytest", "unittest",
 ]
 
 
@@ -60,6 +70,7 @@ a = Analysis(
         *fwhisper_data,
         *ct2_data,
         *soundcard_data,
+        *_bundle_models(),
     ],
     hiddenimports=[
         *fwhisper_hidden,
@@ -85,11 +96,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX is known to break PyQt6 plugin DLLs - leave compression off.
     upx=False,
-    # Keep console=True for the first builds so users see startup logs and
-    # any crash trace. Flip to False once the app is stable for a "release"
-    # build with no terminal window.
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,

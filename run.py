@@ -2,41 +2,59 @@
 
 Run from the project root:
     python run.py
-    python run.py --simple                  # normal titled window
-    python run.py --no-stealth              # disable WDA_EXCLUDEFROMCAPTURE
-    python run.py --reset-window            # ignore saved position
-    python run.py --whisper-model tiny      # try a smaller model
+    python run.py --simple       # normal titled window
+    python run.py --no-stealth   # disable WDA_EXCLUDEFROMCAPTURE
+    python run.py --reset-window # ignore saved position
 """
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: disable Hugging Face's native Rust accelerators BEFORE anything
-# else loads them. `hf_xet` is a Rust chunked downloader bundled with
-# huggingface_hub for performance; on hypervisor / virtualized CPUs that
-# don't expose modern SIMD features it crashes with STATUS_ILLEGAL_INSTRUCTION
-# (0xc000001d) the moment it tries to fetch a file. Forcing HF Hub to use
-# the plain-Python HTTP path keeps downloads slower-but-safe everywhere.
-# Belt-and-suspenders: also `pip uninstall hf-xet -y`.
+# CRITICAL: configure Hugging Face Hub BEFORE faster-whisper imports it.
+#
+# This build ships the Whisper 'small' model INSIDE the project folder
+# (at models/hf-cache/). On launch we point HF_HOME at that bundled
+# folder and force HF_HUB_OFFLINE=1 so faster-whisper:
+#   - never makes a network call to huggingface.co
+#   - never shows a "downloading" progress bar
+#   - never fails on flaky WiFi or DNS
+# It just loads the local model and starts.
+#
+# Also disables hf_xet (Rust accelerator that crashes on hypervisor CPUs)
+# and the metadata progress bars.
 # ---------------------------------------------------------------------------
 import os
+import sys
+from pathlib import Path
+
+# Where the .exe (or run.py in dev) lives. The bundled model sits next
+# to it under models/hf-cache/.
+if getattr(sys, "frozen", False):
+    _APP_DIR = Path(sys.executable).parent
+else:
+    _APP_DIR = Path(__file__).resolve().parent
+
+_BUNDLED_HF_CACHE = _APP_DIR / "models" / "hf-cache"
+_BUNDLED_HF_HUB = _BUNDLED_HF_CACHE / "hub"
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ["HF_HOME"] = str(_BUNDLED_HF_CACHE)
+os.environ["HUGGINGFACE_HUB_CACHE"] = str(_BUNDLED_HF_HUB)
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+print(f"[startup] using bundled HF cache at: {_BUNDLED_HF_HUB}", flush=True)
+print("[startup] HF offline mode forced - no network, no downloads.", flush=True)
 
 import faulthandler
-import sys
 import traceback
-from pathlib import Path
 
 # faulthandler catches NATIVE crashes (segfault, illegal instruction,
-# abort) that ordinary Python try/except cannot. Without it,
-# ctranslate2 / numpy / torch crashes look like the process silently
-# evaporated. With it, we get a Python-level stack trace pointing at
-# the exact line where the C++ code died.
+# abort) that ordinary Python try/except cannot.
 faulthandler.enable()
 
-# Disable Python's stdout/stderr buffering so we see every print() the
-# instant it happens. PowerShell can buffer aggressively otherwise.
 try:
     sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
     sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]

@@ -80,55 +80,21 @@ class SettingsDialog(QDialog):
     def _provider_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["groq", "openrouter", "deepseek", "ollama"])
-        self.provider_combo.setCurrentText(self.settings.provider)
-
-        self.groq_key = QLineEdit(self.settings.groq_api_key)
-        self.groq_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.groq_model = QLineEdit(self.settings.groq_model)
-
-        self.openrouter_key = QLineEdit(self.settings.openrouter_api_key)
-        self.openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.openrouter_model = QLineEdit(self.settings.openrouter_model)
 
         self.deepseek_key = QLineEdit(self.settings.deepseek_api_key)
         self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.deepseek_model = QLineEdit(self.settings.deepseek_model)
         self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
 
-        self.ollama_model = QLineEdit(self.settings.ollama_model)
-        self.ollama_host = QLineEdit(self.settings.ollama_host)
-
-        f.addRow("Provider:", self.provider_combo)
-        f.addRow(QLabel("<b>Groq (cloud, fast, free tier)</b>"))
-        f.addRow("API key:", self.groq_key)
-        f.addRow("Model:", self.groq_model)
         f.addRow(QLabel(
-            "<b>OpenRouter (cloud, fewer IP blocks than Groq)</b>"
-            "<br><i>Free key at <code>https://openrouter.ai/keys</code>. "
-            "Free models end in <code>:free</code>. "
-            "<b>Comma-separate multiple models</b> for automatic fallback on rate-limit "
-            "(the free tier of any single model is hit hard).</i>"
-        ))
-        self.openrouter_model.setToolTip(
-            "Comma-separated list of model ids. The provider tries each in order "
-            "and falls through to the next on HTTP 429 (rate-limit)."
-        )
-        f.addRow("API key:", self.openrouter_key)
-        f.addRow("Model(s):", self.openrouter_model)
-        f.addRow(QLabel(
-            "<b>DeepSeek (cheap paid, OpenAI-compatible)</b>"
-            "<br><i>Key at <code>https://platform.deepseek.com/api_keys</code>. "
-            "Models: <code>deepseek-chat</code> (V3, fast) or "
+            "<b>DeepSeek (cloud, OpenAI-compatible, ~$0.14/M tokens)</b>"
+            "<br><i>Get a key at <code>https://platform.deepseek.com/api_keys</code>. "
+            "Models: <code>deepseek-chat</code> (V3, fast - recommended) or "
             "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
         ))
         f.addRow("API key:", self.deepseek_key)
         f.addRow("Model:", self.deepseek_model)
         f.addRow("Base URL:", self.deepseek_base_url)
-        f.addRow(QLabel("<b>Ollama (local model)</b>"))
-        f.addRow("Model:", self.ollama_model)
-        f.addRow("Host:", self.ollama_host)
         return w
 
     def _context_tab(self) -> QWidget:
@@ -337,28 +303,24 @@ class SettingsDialog(QDialog):
     def _audio_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
-        self.whisper_model_combo = QComboBox()
-        self.whisper_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
-        self.whisper_model_combo.setCurrentText(self.settings.whisper_model)
 
-        self.whisper_compute_combo = QComboBox()
-        self.whisper_compute_combo.addItems(["int8", "int8_float16", "float16", "float32"])
-        self.whisper_compute_combo.setCurrentText(self.settings.whisper_compute)
-
-        self.whisper_device_combo = QComboBox()
-        self.whisper_device_combo.addItems(["cpu", "cuda"])
-        self.whisper_device_combo.setCurrentText(self.settings.whisper_device)
+        # Whisper model is locked to 'small' - the model files are
+        # bundled inside the .exe folder and that's the only one
+        # available offline. Showing a dropdown that lets the user pick
+        # 'medium' or 'large-v3' would just trigger a 1-3 GB download
+        # attempt that fails because we're locked offline.
+        self.whisper_model_label = QLabel(f"<code>{self.settings.whisper_model}</code> (bundled, offline-only)")
 
         self.window_spin = QDoubleSpinBox()
         self.window_spin.setRange(5.0, 60.0)
         self.window_spin.setSingleStep(1.0)
         self.window_spin.setValue(self.settings.answer_window_seconds)
 
-        f.addRow("Whisper model:", self.whisper_model_combo)
-        f.addRow("Compute type:", self.whisper_compute_combo)
-        f.addRow("Device:", self.whisper_device_combo)
+        f.addRow("Whisper model:", self.whisper_model_label)
         f.addRow("Audio window (sec):", self.window_spin)
-        f.addRow(QLabel("<i>Whisper changes apply on next app restart.</i>"))
+        f.addRow(QLabel(
+            "<i>Whisper is bundled offline. No downloads, ever.</i>"
+        ))
         return w
 
     def _hotkeys_tab(self) -> QWidget:
@@ -401,25 +363,17 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _save(self) -> None:
         s = self.settings
-        s.provider = self.provider_combo.currentText()
-        s.groq_api_key = self.groq_key.text().strip()
-        s.groq_model = self.groq_model.text().strip()
-        s.openrouter_api_key = self.openrouter_key.text().strip()
-        s.openrouter_model = self.openrouter_model.text().strip()
         s.deepseek_api_key = self.deepseek_key.text().strip()
-        s.deepseek_model = self.deepseek_model.text().strip()
-        s.deepseek_base_url = self.deepseek_base_url.text().strip()
-        s.ollama_model = self.ollama_model.text().strip()
-        s.ollama_host = self.ollama_host.text().strip()
+        s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
+        s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()
         s.job_description = self.job_edit.toPlainText()
         s.custom_system_prompt = self.custom_edit.toPlainText()
 
-        s.whisper_model = self.whisper_model_combo.currentText()
-        s.whisper_compute = self.whisper_compute_combo.currentText()
-        s.whisper_device = self.whisper_device_combo.currentText()
+        # Whisper model is hard-pinned to 'small' (bundled). Don't let
+        # anyone overwrite it from the UI.
         s.answer_window_seconds = float(self.window_spin.value())
 
         s.hotkey_answer = self.hk_answer.text().strip()

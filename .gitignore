@@ -222,3 +222,7 @@ __marimo__/
 # The default Python .gitignore above excludes *.spec; whitelist ours
 # so PyInstaller picks it up on every machine that runs build.bat.
 !cluely-killer.spec
+
+# Bundled Whisper model files (populated by setup-model.ps1). They're
+# 400+ MB binary blobs - never commit to git, just rebuild locally.
+models/
