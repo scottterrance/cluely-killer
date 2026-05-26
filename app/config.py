@@ -46,9 +46,18 @@ class Settings:
     ollama_host: str = "http://localhost:11434"
 
     # ---- Speech-to-Text (faster-whisper) ----
-    # Models in order of size/quality: tiny, base, small, medium, large-v3
-    # "small" is the sweet spot for English on a CPU.
-    whisper_model: str = "small"
+    # Models in order of size/quality: tiny, base, small, medium,
+    # large-v3, large-v3-turbo.
+    #
+    # Default is large-v3-turbo: ~6-8x faster than large-v3 at the same
+    # English accuracy thanks to OpenAI's 2024 distillation. On a modern
+    # CPU it transcribes a 25-second clip in ~3-5 seconds at int8.
+    # First-run download is ~1.5 GB to ~/.cache/huggingface (one time).
+    #
+    # If your machine struggles (older CPU, <8 GB free RAM, or no AVX2),
+    # drop to "small" in Settings -> Speech-to-Text. Quality stays good
+    # and the model file shrinks to ~466 MB.
+    whisper_model: str = "large-v3-turbo"
     whisper_compute: str = "int8"   # int8 / int8_float16 / float16 / float32
     whisper_device: str = "cpu"     # cpu / cuda
 

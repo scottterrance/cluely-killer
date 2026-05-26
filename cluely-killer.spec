@@ -6,9 +6,10 @@
 # Output: dist/cluely-killer/cluely-killer.exe  (one-folder bundle).
 # To distribute, zip the entire dist/cluely-killer/ folder.
 #
-# Whisper model files are NOT bundled (they're 466+ MB and would fail
+# Whisper model files are NOT bundled (they're 1.5+ GB and would fail
 # legal redistribution policies). They download to ~/.cache/huggingface
-# on first run, same as in dev.
+# on first run, same as in dev. Default model is large-v3-turbo (~1.5 GB);
+# change settings to "small" if you'd rather a 466 MB download.
 
 # ruff: noqa
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
