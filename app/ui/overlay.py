@@ -1,15 +1,15 @@
 """Frameless, draggable, always-on-top overlay window.
 
-Renders the LLM stream as it arrives. Two highlight conventions are
-recognized:
+Layout (top to bottom):
+  - Header: status badge, mem badge, STEALTH/VISIBLE pill, settings/hide/quit
+  - Stealth-OFF banner (only visible when stealth is off)
+  - Live transcript view (continuous, auto-scrolling, scrollable up)
+  - Answer view (LLM stream with ==red== / **yellow** highlighting)
+  - Footer: hotkey hints
 
+Highlight conventions in the answer panel:
   ==word==   -> RED   (most stressed keywords, 2-3 per sentence)
   **word**   -> YELLOW (softer secondary emphasis, sparing)
-
-The header carries a STEALTH / VISIBLE badge so the candidate can verify
-at a glance that the overlay is hidden from screen capture before
-starting the interview, plus a small "mem N" badge showing how many
-prior Q+A turns the LLM is remembering.
 """
 from __future__ import annotations
 
@@ -32,12 +32,10 @@ from ..config import Settings
 from ..core.controller import Controller
 from .styles import APP_QSS
 
-# Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
-# over '=' / '*' boundaries on partial streams.
+# Order matters: parse ==red== BEFORE **bold**.
 _RED_RE = re.compile(r"==(.+?)==", flags=re.DOTALL)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
-
-_RED_STYLE = 'color:#FF6B6B;font-weight:700;'
+_RED_STYLE = "color:#FF6B6B;font-weight:700;"
 
 
 def _md_to_html(text: str) -> str:
@@ -86,10 +84,10 @@ class OverlayWindow(QWidget):
                 | Qt.WindowType.WindowStaysOnTopHint
             )
         self.setWindowOpacity(self.settings.opacity)
-        self.setMinimumSize(420, 240)
+        self.setMinimumSize(420, 280)
         self.resize(
             max(self.settings.window_w, 420),
-            max(self.settings.window_h, 240),
+            max(self.settings.window_h, 280),
         )
 
     def place_on_screen(self) -> None:
@@ -117,10 +115,11 @@ class OverlayWindow(QWidget):
             f"[overlay] placed at x={self.x()} y={self.y()} "
             f"size={self.width()}x{self.height()} "
             f"on a {len(screens)}-screen setup. "
-            f"simple_mode={self.simple_mode}."
+            f"simple_mode={self.simple_mode}.",
+            flush=True,
         )
 
-    def closeEvent(self, e):  # noqa: N802 (Qt API)
+    def closeEvent(self, e):  # noqa: N802
         self.settings.window_x = self.x()
         self.settings.window_y = self.y()
         self.settings.window_w = self.width()
@@ -182,8 +181,7 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
-        # --- Loud warning when stealth is OFF (interviewer can see this) ---
-        # Hidden when stealth is active so the overlay stays unobtrusive.
+        # --- Stealth-OFF banner (hidden when stealth is on) ---
         self.stealth_warning = QLabel(
             "\u26a0  STEALTH OFF \u2014 the interviewer's screen-share WILL show this overlay. "
             "Open Settings (\u2699) \u2192 Window \u2192 'Hide window from screen capture'."
@@ -193,14 +191,20 @@ class OverlayWindow(QWidget):
         self.stealth_warning.setVisible(False)
         v.addWidget(self.stealth_warning)
 
-        # --- Question / transcript ---
-        self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
-        self.question_label.setObjectName("question")
-        self.question_label.setWordWrap(True)
-        self.question_label.setMaximumHeight(60)
-        v.addWidget(self.question_label)
+        # --- Live transcript (continuous, scrollable) ---
+        self.transcript_view = QTextBrowser()
+        self.transcript_view.setObjectName("transcript")
+        self.transcript_view.setOpenExternalLinks(False)
+        self.transcript_view.setFrameShape(QFrame.Shape.NoFrame)
+        self.transcript_view.setMinimumHeight(60)
+        self.transcript_view.setMaximumHeight(110)
+        self.transcript_view.setPlaceholderText(
+            "Live transcript will appear here as the interviewer speaks. "
+            "Scroll up to read history."
+        )
+        v.addWidget(self.transcript_view)
 
-        # --- Answer ---
+        # --- Answer panel ---
         self.answer_view = QTextBrowser()
         self.answer_view.setObjectName("answer")
         self.answer_view.setOpenExternalLinks(False)
@@ -241,14 +245,13 @@ class OverlayWindow(QWidget):
             )
             self.stealth_label.setProperty("alarm", "true")
             self.stealth_warning.setVisible(True)
-        # Re-evaluate the [alarm] style selector.
         self.stealth_label.style().unpolish(self.stealth_label)
         self.stealth_label.style().polish(self.stealth_label)
 
     # ------------------------------------------------------------------
     def _wire_signals(self) -> None:
         c = self.controller
-        c.transcript_ready.connect(self._on_transcript)
+        c.transcript_ready.connect(self._on_transcript_ready)
         c.answer_started.connect(self._on_answer_start)
         c.answer_chunk.connect(self._on_answer_chunk)
         c.answer_finished.connect(self._on_answer_finished)
@@ -256,10 +259,41 @@ class OverlayWindow(QWidget):
         c.status.connect(self._on_status)
         c.history_changed.connect(self._on_history_changed)
 
+        c.transcript_appended.connect(self._on_transcript_appended)
+        c.transcript_cleared.connect(self._on_transcript_cleared)
+        c.answer_trigger_marker.connect(self._on_answer_trigger_marker)
+
+    def _append_transcript(self, text: str) -> None:
+        """Append a paragraph to the transcript view, auto-scrolling to
+        the bottom only if the user was already at the bottom (so a
+        manual scroll-up to read history isn't yanked back).
+        """
+        bar = self.transcript_view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        self.transcript_view.append(text)
+        if at_bottom:
+            bar.setValue(bar.maximum())
+
     @pyqtSlot(str)
-    def _on_transcript(self, text: str) -> None:
-        display = text if len(text) <= 220 else "..." + text[-220:]
-        self.question_label.setText(f"Q: {display}")
+    def _on_transcript_appended(self, text: str) -> None:
+        self._append_transcript(text)
+
+    @pyqtSlot()
+    def _on_transcript_cleared(self) -> None:
+        self.transcript_view.clear()
+
+    @pyqtSlot()
+    def _on_answer_trigger_marker(self) -> None:
+        # Faint horizontal marker so the user can see WHERE in the live
+        # transcript they triggered an answer. Helps with replay.
+        self._append_transcript("\u2500\u2500\u2500 \u25b6 answering \u2500\u2500\u2500")
+
+    @pyqtSlot(str)
+    def _on_transcript_ready(self, text: str) -> None:
+        # Triggered (Ctrl+Space) transcript - show as a Q: line in the
+        # transcript view so the user knows exactly which question the
+        # AI is answering right now.
+        self._append_transcript(f"Q: {text}")
 
     @pyqtSlot()
     def _on_answer_start(self) -> None:

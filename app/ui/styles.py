@@ -55,11 +55,15 @@ QWidget#OverlayRoot {
     padding: 0 6px;
 }
 
-#question {
-    color: #9aa3b2;
-    font-size: 12px;
+#transcript {
+    background-color: rgba(255, 255, 255, 8);
+    color: #c8ced9;
+    border: 1px solid rgba(255, 255, 255, 18);
+    border-radius: 4px;
+    font-size: 11px;
     font-style: italic;
-    padding: 2px 0;
+    font-family: 'Segoe UI', 'Inter', sans-serif;
+    padding: 4px 6px;
 }
 
 #answer {

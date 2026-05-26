@@ -327,6 +327,7 @@ def main() -> None:
     def cleanup() -> None:
         hotkeys.stop()
         capture.stop()
+        controller.stop_live_transcription()
 
     app.aboutToQuit.connect(cleanup)
 
