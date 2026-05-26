@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import Settings
+from ..core.personas import DEFAULT_NAME, Persona, PersonaStore
 from ..utils.extract import extract_text
 from .drop_text_edit import DropZoneTextEdit
 
@@ -30,8 +32,24 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("cluely-killer — Settings")
-        self.resize(660, 580)
+        self.persona_store = PersonaStore()
+        # First-time use: seed Default from whatever's currently in Settings
+        # so the user never sees an empty dropdown.
+        self.persona_store.ensure_seeded(
+            Persona(
+                name=DEFAULT_NAME,
+                about_me=settings.about_me,
+                resume_text=settings.resume_text,
+                job_description=settings.job_description,
+                custom_system_prompt=settings.custom_system_prompt,
+            )
+        )
+        # Suppress the persona-changed signal during programmatic
+        # repopulation so we don't trigger spurious field overwrites.
+        self._suppress_persona_signal = False
+
+        self.setWindowTitle("cluely-killer - Settings")
+        self.resize(680, 620)
 
         tabs = QTabWidget()
         tabs.addTab(self._provider_tab(), "AI Provider")
@@ -53,6 +71,10 @@ class SettingsDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(tabs)
         outer.addLayout(buttons)
+
+        # Build now that all widgets exist.
+        self._populate_persona_dropdown()
+        self._load_active_persona_into_fields()
 
     # ------------------------------------------------------------------
     def _provider_tab(self) -> QWidget:
@@ -92,6 +114,37 @@ class SettingsDialog(QDialog):
     def _context_tab(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
+
+        # ----- Persona row at the very top of the tab -----
+        persona_row = QHBoxLayout()
+        persona_row.addWidget(QLabel("Persona:"))
+        self.persona_combo = QComboBox()
+        self.persona_combo.setToolTip(
+            "Switch between saved persona presets. "
+            "Clicking the main Save button below also updates the active persona."
+        )
+        self.persona_combo.currentTextChanged.connect(self._persona_changed)
+        persona_row.addWidget(self.persona_combo, stretch=1)
+
+        self.persona_save_as_btn = QPushButton("Save As...")
+        self.persona_save_as_btn.setToolTip("Create a new persona with the current Context fields")
+        self.persona_save_as_btn.clicked.connect(self._persona_save_as)
+        persona_row.addWidget(self.persona_save_as_btn)
+
+        self.persona_rename_btn = QPushButton("Rename...")
+        self.persona_rename_btn.clicked.connect(self._persona_rename)
+        persona_row.addWidget(self.persona_rename_btn)
+
+        self.persona_delete_btn = QPushButton("Delete")
+        self.persona_delete_btn.clicked.connect(self._persona_delete)
+        persona_row.addWidget(self.persona_delete_btn)
+        v.addLayout(persona_row)
+
+        v.addWidget(QLabel(
+            "<i>Personas let you switch between job applications "
+            "(e.g. 'Stripe Senior PM' / 'Junior Dev') with one click.</i>"
+        ))
+
         v.addWidget(QLabel("About me (1-3 sentences):"))
         self.about_edit = QTextEdit(self.settings.about_me)
         self.about_edit.setMaximumHeight(70)
@@ -135,6 +188,103 @@ class SettingsDialog(QDialog):
         self.custom_edit.setMaximumHeight(80)
         v.addWidget(self.custom_edit)
         return w
+
+    # ---- Persona helpers --------------------------------------------------
+    def _populate_persona_dropdown(self) -> None:
+        self._suppress_persona_signal = True
+        try:
+            self.persona_combo.clear()
+            self.persona_combo.addItems(self.persona_store.names())
+            active = self.persona_store.active_name()
+            idx = self.persona_combo.findText(active)
+            if idx >= 0:
+                self.persona_combo.setCurrentIndex(idx)
+        finally:
+            self._suppress_persona_signal = False
+
+    def _load_active_persona_into_fields(self) -> None:
+        p = self.persona_store.get_active()
+        if p is None:
+            return
+        self.about_edit.setPlainText(p.about_me)
+        self.resume_edit.setPlainText(p.resume_text)
+        self.job_edit.setPlainText(p.job_description)
+        self.custom_edit.setPlainText(p.custom_system_prompt)
+
+    def _current_persona_from_fields(self, name: str) -> Persona:
+        return Persona(
+            name=name,
+            about_me=self.about_edit.toPlainText(),
+            resume_text=self.resume_edit.toPlainText(),
+            job_description=self.job_edit.toPlainText(),
+            custom_system_prompt=self.custom_edit.toPlainText(),
+        )
+
+    def _persona_changed(self, name: str) -> None:
+        if self._suppress_persona_signal or not name:
+            return
+        # Picking a different persona overwrites the boxes with that
+        # persona's content. Persisted immediately so the choice survives
+        # a Cancel.
+        self.persona_store.set_active(name)
+        self._load_active_persona_into_fields()
+
+    def _persona_save_as(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save persona", "Name for new persona:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "Save persona", "Name cannot be empty.")
+            return
+        if name in self.persona_store.names():
+            QMessageBox.warning(
+                self, "Save persona",
+                f"A persona named {name!r} already exists. Use Rename or pick a different name."
+            )
+            return
+        self.persona_store.upsert(self._current_persona_from_fields(name))
+        self.persona_store.set_active(name)
+        self._populate_persona_dropdown()
+
+    def _persona_rename(self) -> None:
+        old = self.persona_store.active_name()
+        new, ok = QInputDialog.getText(
+            self, "Rename persona", "New name:", text=old
+        )
+        if not ok:
+            return
+        new = new.strip()
+        if not self.persona_store.rename(old, new):
+            QMessageBox.warning(
+                self, "Rename persona",
+                "Rename failed. The new name must be non-empty, different from "
+                "the current one, and not already in use."
+            )
+            return
+        self._populate_persona_dropdown()
+
+    def _persona_delete(self) -> None:
+        active = self.persona_store.active_name()
+        if len(self.persona_store.names()) <= 1:
+            QMessageBox.information(
+                self, "Delete persona",
+                "Can't delete the last persona. Create another one first."
+            )
+            return
+        ans = QMessageBox.question(
+            self, "Delete persona",
+            f"Delete persona {active!r}? This can't be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        if not self.persona_store.delete(active):
+            QMessageBox.warning(self, "Delete persona", "Delete failed.")
+            return
+        self._populate_persona_dropdown()
+        self._load_active_persona_into_fields()
 
     def _import_into(self, target_edit: QTextEdit, label: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -257,4 +407,18 @@ class SettingsDialog(QDialog):
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())
+
+        # Sync the active persona with whatever's now in the boxes so
+        # personas always reflect what the user just committed.
+        active = self.persona_store.active_name()
+        self.persona_store.upsert(
+            Persona(
+                name=active,
+                about_me=s.about_me,
+                resume_text=s.resume_text,
+                job_description=s.job_description,
+                custom_system_prompt=s.custom_system_prompt,
+            )
+        )
+
         self.accept()
