@@ -22,6 +22,29 @@ QWidget#OverlayRoot {
     padding: 2px 4px;
 }
 
+#stealthBadge {
+    color: #4ade80;
+    background-color: rgba(74, 222, 128, 28);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    border: 1px solid rgba(74, 222, 128, 60);
+}
+
+#stealthBadge[alarm="true"] {
+    color: #fca5a5;
+    background-color: rgba(248, 113, 113, 38);
+    border: 1px solid rgba(248, 113, 113, 90);
+}
+
+#memBadge {
+    color: #c8ced9;
+    font-size: 9px;
+    padding: 0 6px;
+}
+
 #question {
     color: #9aa3b2;
     font-size: 12px;

@@ -19,13 +19,20 @@ class GroqProvider(LLMProvider):
         self.client = Groq(api_key=api_key)
         self.model = model
 
-    def stream_chat(self, system_prompt: str, user_message: str) -> Iterator[str]:
+    def stream_chat(
+        self,
+        system_prompt: str,
+        user_message: str,
+        prior_messages: list[dict] | None = None,
+    ) -> Iterator[str]:
+        msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+        if prior_messages:
+            msgs.extend(prior_messages)
+        msgs.append({"role": "user", "content": user_message})
+
         stream = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=msgs,
             stream=True,
             temperature=0.6,
             max_tokens=400,

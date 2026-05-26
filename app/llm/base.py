@@ -7,5 +7,16 @@ from typing import Iterator
 
 class LLMProvider(ABC):
     @abstractmethod
-    def stream_chat(self, system_prompt: str, user_message: str) -> Iterator[str]:
-        """Yield text chunks as they arrive from the model."""
+    def stream_chat(
+        self,
+        system_prompt: str,
+        user_message: str,
+        prior_messages: list[dict] | None = None,
+    ) -> Iterator[str]:
+        """Yield text chunks as they arrive from the model.
+
+        `prior_messages` is the conversation history as alternating
+        {"role": "user" | "assistant", "content": ...} dicts (without
+        the system message). When provided, the model can reference
+        earlier turns for follow-up questions.
+        """

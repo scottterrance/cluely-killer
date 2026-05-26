@@ -51,11 +51,13 @@ class Settings:
     custom_system_prompt: str = ""
 
     # ---- Window / stealth ----
-    # WDA_EXCLUDEFROMCAPTURE has known interactions with RDP / virtual
-    # desktops / certain GPU drivers where the window becomes invisible
-    # to the local user too. Default OFF; flip on from Settings once you've
-    # confirmed the window renders for you.
-    exclude_from_capture: bool = False
+    # ON by default: the whole point of the app is that the interviewer
+    # can't see the overlay during a screen share. We removed the
+    # WA_TranslucentBackground attribute that used to break rendering on
+    # Win11 24H2, so the stealth + visibility combination is now reliable.
+    # Use --no-stealth at startup if you ever need to turn it off without
+    # opening Settings (e.g. when running over RDP).
+    exclude_from_capture: bool = True
     opacity: float = 0.95
     # Last known on-screen geometry; refreshed on close. -1 = "not set yet".
     window_x: int = -1

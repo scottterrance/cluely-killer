@@ -142,6 +142,7 @@ def main() -> None:
     # ---- Orchestration ----
     _say("wiring controller, prompts, providers...")
     from .core.controller import Controller
+    from .core.history import ConversationHistory
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.groq_provider import GroqProvider
@@ -166,6 +167,7 @@ def main() -> None:
         )
 
     scheduler = ExampleScheduler()
+    history = ConversationHistory(max_turns=5)
     controller = Controller(
         settings=settings,
         audio_buffer=buffer,
@@ -173,8 +175,9 @@ def main() -> None:
         llm_factory=_llm_factory,
         scheduler=scheduler,
         prompt_builder=_prompt_for,
+        history=history,
     )
-    _say("controller ready.")
+    _say("controller ready (memory keeps last 5 Q+A turns).")
 
     # ---- UI ----
     _say("building overlay window...")
@@ -186,7 +189,13 @@ def main() -> None:
         if dlg.exec():
             save_settings(settings)
             overlay.setWindowOpacity(settings.opacity)
-            exclude_window_from_capture(int(overlay.winId()), settings.exclude_from_capture)
+            ok = exclude_window_from_capture(
+                int(overlay.winId()), settings.exclude_from_capture
+            )
+            # If the user toggled stealth ON but the OS rejected it,
+            # treat it as visible for the badge so they aren't lulled
+            # into a false sense of security.
+            overlay.update_stealth_badge(settings.exclude_from_capture and ok)
             overlay.refresh_footer()
             apply_hotkeys()
 
@@ -203,17 +212,20 @@ def main() -> None:
     overlay.place_on_screen()
 
     # Stealth must happen AFTER show() so the HWND is valid.
+    stealth_active = False
     if settings.exclude_from_capture:
         ok = exclude_window_from_capture(int(overlay.winId()), True)
         if not ok and sys.platform == "win32":
             _say("WDA_EXCLUDEFROMCAPTURE failed - needs Windows 10 build 19041+.")
         else:
+            stealth_active = bool(ok)
             _say(
                 "stealth ON: window is hidden from screen-capture APIs. "
                 "If you cannot see it locally either, run with --no-stealth."
             )
     else:
         _say("stealth OFF: window is visible to screen-capture too.")
+    overlay.update_stealth_badge(stealth_active)
 
     # ---- Hotkeys (with cross-thread marshalling) ----
     dispatcher = HotkeyDispatcher()

@@ -17,6 +17,7 @@ from ..config import Settings
 from ..llm.base import LLMProvider
 from ..prompts.builder import ExampleScheduler
 from ..stt.whisper_engine import WhisperEngine
+from .history import ConversationHistory
 
 
 class Controller(QObject):
@@ -27,6 +28,7 @@ class Controller(QObject):
     answer_finished = pyqtSignal()
     error = pyqtSignal(str)
     status = pyqtSignal(str)
+    history_changed = pyqtSignal(int)  # current turn count
 
     def __init__(
         self,
@@ -36,6 +38,7 @@ class Controller(QObject):
         llm_factory: Callable[[Settings], LLMProvider],
         scheduler: ExampleScheduler,
         prompt_builder: Callable[[Settings, bool], str],
+        history: ConversationHistory,
     ):
         super().__init__()
         self.settings = settings
@@ -44,19 +47,22 @@ class Controller(QObject):
         self.llm_factory = llm_factory
         self.scheduler = scheduler
         self.prompt_builder = prompt_builder
+        self.history = history
         self._busy = threading.Lock()
 
     # ------------------------------------------------------------------
     def trigger_answer(self) -> None:
         """Hotkey entry point. Non-blocking; safe to call from any thread."""
         if not self._busy.acquire(blocking=False):
-            self.status.emit("Busy — wait for current answer to finish")
+            self.status.emit("Busy - wait for current answer to finish")
             return
         threading.Thread(target=self._do_answer, daemon=True, name="AnswerWorker").start()
 
     def clear(self) -> None:
         self.audio_buffer.clear()
-        self.status.emit("Audio buffer cleared")
+        self.history.clear()
+        self.history_changed.emit(0)
+        self.status.emit("Audio buffer + memory cleared")
 
     # ------------------------------------------------------------------
     def _do_answer(self) -> None:
@@ -64,7 +70,7 @@ class Controller(QObject):
             self.status.emit("Transcribing...")
             audio = self.audio_buffer.get_last_seconds(self.settings.answer_window_seconds)
             if audio.size < self.whisper.samplerate:  # less than 1 second
-                self.error.emit("Not enough audio yet — let the interviewer talk first.")
+                self.error.emit("Not enough audio yet - let the interviewer talk first.")
                 return
 
             transcript = self.whisper.transcribe(audio)
@@ -77,11 +83,21 @@ class Controller(QObject):
             include_example = self.scheduler.should_include()
             system_prompt = self.prompt_builder(self.settings, include_example)
             llm = self.llm_factory(self.settings)
+            prior = self.history.as_messages()
 
             self.answer_started.emit()
-            for chunk in llm.stream_chat(system_prompt, transcript):
+            chunks: list[str] = []
+            for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
+                chunks.append(chunk)
                 self.answer_chunk.emit(chunk)
             self.answer_finished.emit()
+
+            full = "".join(chunks).strip()
+            # Don't poison the memory with non-answers.
+            if full and full.upper() != "SKIP":
+                self.history.add(transcript, full)
+                self.history_changed.emit(len(self.history))
+
             self.status.emit("Ready")
         except Exception as e:
             traceback.print_exc()

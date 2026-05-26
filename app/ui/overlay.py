@@ -1,20 +1,15 @@
 """Frameless, draggable, always-on-top overlay window.
 
-Renders the LLM stream as it arrives. **bold** is converted to <b>
-on every chunk so keyword highlighting appears live.
+Renders the LLM stream as it arrives. Two highlight conventions are
+recognized:
 
-Window flags:
-  - FramelessWindowHint     : no title bar (we draw our own header)
-  - WindowStaysOnTopHint    : always above the meeting window
-  - NO WA_TranslucentBackground: this attribute combined with frameless
-    causes the window to render zero pixels on Windows 11 24H2 (build
-    26100+) under newer DWM compositors. We use a solid dark background
-    instead. Stealth-via-WDA_EXCLUDEFROMCAPTURE still works without it.
-  - NO Qt.WindowType.Tool   : keeping the window in the taskbar makes it
-    findable if it ever ends up off-screen. Stealth users can opt it
-    back via Settings later if desired.
+  ==word==   -> RED   (most stressed keywords, 2-3 per sentence)
+  **word**   -> YELLOW (softer secondary emphasis, sparing)
 
-Pass simple_mode=True for a fully-normal titled window (debug fallback).
+The header carries a STEALTH / VISIBLE badge so the candidate can verify
+at a glance that the overlay is hidden from screen capture before
+starting the interview, plus a small "mem N" badge showing how many
+prior Q+A turns the LLM is remembering.
 """
 from __future__ import annotations
 
@@ -37,7 +32,12 @@ from ..config import Settings
 from ..core.controller import Controller
 from .styles import APP_QSS
 
+# Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
+# over '=' / '*' boundaries on partial streams.
+_RED_RE = re.compile(r"==(.+?)==", flags=re.DOTALL)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
+
+_RED_STYLE = 'color:#FF6B6B;font-weight:700;'
 
 
 def _md_to_html(text: str) -> str:
@@ -46,6 +46,7 @@ def _md_to_html(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+    text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
     text = _BOLD_RE.sub(r"<b>\1</b>", text)
     return text.replace("\n", "<br>")
 
@@ -71,12 +72,12 @@ class OverlayWindow(QWidget):
         self._setup_window()
         self._build_ui()
         self._wire_signals()
+        self.update_stealth_badge(settings.exclude_from_capture)
 
     # ------------------------------------------------------------------
     def _setup_window(self) -> None:
         self.setObjectName("OverlayRoot")
         if self.simple_mode:
-            # Plain decorated window — guaranteed visible everywhere.
             self.setWindowTitle("cluely-killer")
             self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         else:
@@ -84,8 +85,6 @@ class OverlayWindow(QWidget):
                 Qt.WindowType.FramelessWindowHint
                 | Qt.WindowType.WindowStaysOnTopHint
             )
-        # NO WA_TranslucentBackground: it interacts badly with Qt6 +
-        # frameless on Windows 11 24H2 and produces a 0-pixel window.
         self.setWindowOpacity(self.settings.opacity)
         self.setMinimumSize(420, 240)
         self.resize(
@@ -94,9 +93,6 @@ class OverlayWindow(QWidget):
         )
 
     def place_on_screen(self) -> None:
-        """Center on the primary screen, or restore last position if it lies
-        on a currently-attached monitor. Always called *after* show().
-        """
         from PyQt6.QtGui import QGuiApplication
 
         screens = QGuiApplication.screens()
@@ -131,6 +127,7 @@ class OverlayWindow(QWidget):
         self.settings.window_h = self.height()
         super().closeEvent(e)
 
+    # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -143,12 +140,24 @@ class OverlayWindow(QWidget):
         v.setContentsMargins(14, 10, 14, 12)
         v.setSpacing(8)
 
-        # --- Header bar ---
+        # --- Header ---
         header = QHBoxLayout()
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("status")
         header.addWidget(self.status_label)
+
+        self.mem_label = QLabel("mem 0")
+        self.mem_label.setObjectName("memBadge")
+        self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
+        header.addWidget(self.mem_label)
+
         header.addStretch()
+
+        self.stealth_label = QLabel("STEALTH")
+        self.stealth_label.setObjectName("stealthBadge")
+        self.stealth_label.setProperty("alarm", "false")
+        self.stealth_label.setToolTip("Hidden from Zoom / Teams / Meet / OBS screen capture.")
+        header.addWidget(self.stealth_label)
 
         self.settings_btn = QPushButton("\u2699")
         self.settings_btn.setObjectName("iconBtn")
@@ -164,7 +173,7 @@ class OverlayWindow(QWidget):
         self.hide_btn.clicked.connect(self.hide)
         header.addWidget(self.hide_btn)
 
-        self.quit_btn = QPushButton("\u00d7")  # ×
+        self.quit_btn = QPushButton("\u00d7")
         self.quit_btn.setObjectName("iconBtn")
         self.quit_btn.setFixedSize(26, 26)
         self.quit_btn.setToolTip("Quit cluely-killer")
@@ -173,18 +182,21 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
+        # --- Question / transcript ---
         self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
         self.question_label.setMaximumHeight(60)
         v.addWidget(self.question_label)
 
+        # --- Answer ---
         self.answer_view = QTextBrowser()
         self.answer_view.setObjectName("answer")
         self.answer_view.setOpenExternalLinks(False)
         self.answer_view.setFrameShape(QFrame.Shape.NoFrame)
         v.addWidget(self.answer_view, stretch=1)
 
+        # --- Footer ---
         self.footer = QLabel(self._footer_text())
         self.footer.setObjectName("footer")
         v.addWidget(self.footer)
@@ -195,13 +207,30 @@ class OverlayWindow(QWidget):
         return (
             f"{self.settings.hotkey_answer} answer  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
-            f"{self.settings.hotkey_clear} clear  \u00b7  "
-            f"{self.settings.hotkey_settings} settings  \u00b7  "
-            f"{self.settings.hotkey_quit} quit"
+            f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
+            f"{self.settings.hotkey_settings} settings"
         )
 
     def refresh_footer(self) -> None:
         self.footer.setText(self._footer_text())
+
+    # ------------------------------------------------------------------
+    def update_stealth_badge(self, enabled: bool) -> None:
+        if enabled:
+            self.stealth_label.setText("STEALTH")
+            self.stealth_label.setToolTip(
+                "STEALTH ON - hidden from Zoom / Teams / Meet / OBS screen capture."
+            )
+            self.stealth_label.setProperty("alarm", "false")
+        else:
+            self.stealth_label.setText("VISIBLE")
+            self.stealth_label.setToolTip(
+                "STEALTH OFF - the interviewer WILL see this overlay if you share your screen!"
+            )
+            self.stealth_label.setProperty("alarm", "true")
+        # Re-evaluate the [alarm] style selector.
+        self.stealth_label.style().unpolish(self.stealth_label)
+        self.stealth_label.style().polish(self.stealth_label)
 
     # ------------------------------------------------------------------
     def _wire_signals(self) -> None:
@@ -212,6 +241,7 @@ class OverlayWindow(QWidget):
         c.answer_finished.connect(self._on_answer_finished)
         c.error.connect(self._on_error)
         c.status.connect(self._on_status)
+        c.history_changed.connect(self._on_history_changed)
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
@@ -243,6 +273,10 @@ class OverlayWindow(QWidget):
     @pyqtSlot(str)
     def _on_status(self, msg: str) -> None:
         self.status_label.setText(msg)
+
+    @pyqtSlot(int)
+    def _on_history_changed(self, n: int) -> None:
+        self.mem_label.setText(f"mem {n}")
 
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)

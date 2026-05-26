@@ -17,13 +17,20 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.client = ollama.Client(host=host)
 
-    def stream_chat(self, system_prompt: str, user_message: str) -> Iterator[str]:
+    def stream_chat(
+        self,
+        system_prompt: str,
+        user_message: str,
+        prior_messages: list[dict] | None = None,
+    ) -> Iterator[str]:
+        msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+        if prior_messages:
+            msgs.extend(prior_messages)
+        msgs.append({"role": "user", "content": user_message})
+
         stream = self.client.chat(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=msgs,
             stream=True,
             options={
                 "temperature": 0.6,
