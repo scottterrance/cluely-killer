@@ -217,20 +217,73 @@ def main() -> None:
     hotkeys = HotkeyManager()
     overlay: OverlayWindow
 
+    # Re-entrance + hotkey-suspend guard for the Settings dialog.
+    #
+    # Win32 RegisterHotKey is GLOBAL: it consumes the keystroke even when
+    # a modal dialog is on screen. While the user is typing into the
+    # Settings dialog (API key, job description, etc.), any accidental
+    # press of one of our hotkeys would still fire:
+    #   - Ctrl+Shift+S -> opens ANOTHER nested settings dialog
+    #   - Ctrl+Space   -> kicks off a 25-second AnswerWorker in the
+    #                     background (and we've seen those rate-limit
+    #                     and explode mid-stream)
+    #   - Ctrl+Shift+Q -> quits the app outright while user is mid-edit
+    #   - Ctrl+R       -> wipes the audio buffer + memory
+    #   - Ctrl+\       -> hides the overlay, taking the dialog with it
+    # Any of those leaves the app looking "stunned" and forces a kill.
+    #
+    # Fix: while a Settings dialog is on screen, fully UNREGISTER all
+    # global hotkeys. Re-register only after the dialog is gone. The
+    # _settings_open flag is a defensive second layer in case Qt ever
+    # re-delivers a queued settings_requested signal while the previous
+    # dialog hasn't finished tearing down.
+    _settings_open = {"flag": False}
+
     def open_settings_dialog() -> None:
-        dlg = SettingsDialog(settings, parent=overlay)
-        if dlg.exec():
-            save_settings(settings)
-            overlay.setWindowOpacity(settings.opacity)
-            ok = exclude_window_from_capture(
-                int(overlay.winId()), settings.exclude_from_capture
-            )
-            # If the user toggled stealth ON but the OS rejected it,
-            # treat it as visible for the badge so they aren't lulled
-            # into a false sense of security.
-            overlay.update_stealth_badge(settings.exclude_from_capture and ok)
-            overlay.refresh_footer()
+        if _settings_open["flag"]:
+            # Already open (e.g. queued duplicate signal arrived during
+            # the dialog's modal exec). Bring the existing one to front
+            # if we can find it, otherwise just no-op so we don't stack
+            # modals on top of modals.
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SettingsDialog) and w.isVisible():
+                    w.raise_()
+                    w.activateWindow()
+                    break
+            return
+
+        _settings_open["flag"] = True
+        # Suspend ALL global hotkeys for the lifetime of the dialog so
+        # accidental key combos while typing into a field don't fire
+        # background actions.
+        hotkeys.stop()
+        try:
+            dlg = SettingsDialog(settings, parent=overlay)
+            try:
+                result = dlg.exec()
+            finally:
+                # Don't rely on Python GC to tear the dialog down - on
+                # PyQt6 this can leave the widget alive long enough that
+                # a follow-up open lands on a half-destroyed instance.
+                dlg.deleteLater()
+
+            if result:
+                save_settings(settings)
+                overlay.setWindowOpacity(settings.opacity)
+                ok = exclude_window_from_capture(
+                    int(overlay.winId()), settings.exclude_from_capture
+                )
+                # If the user toggled stealth ON but the OS rejected it,
+                # treat it as visible for the badge so they aren't lulled
+                # into a false sense of security.
+                overlay.update_stealth_badge(settings.exclude_from_capture and ok)
+                overlay.refresh_footer()
+        finally:
+            # ALWAYS rebind hotkeys, even if the user cancelled or the
+            # dialog raised. Otherwise the user is left with a running
+            # app that doesn't respond to any of its hotkeys.
             apply_hotkeys()
+            _settings_open["flag"] = False
 
     overlay = OverlayWindow(
         settings,
