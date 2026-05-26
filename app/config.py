@@ -22,7 +22,15 @@ class Settings:
     groq_model: str = "llama-3.3-70b-versatile"
 
     openrouter_api_key: str = ""
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # Comma-separated fallback chain. The provider tries each in order on
+    # HTTP 429 - the popular llama-3.3-70b free tier is rate-limited often.
+    openrouter_model: str = (
+        "meta-llama/llama-3.3-70b-instruct:free, "
+        "google/gemma-2-9b-it:free, "
+        "mistralai/mistral-7b-instruct:free, "
+        "qwen/qwen-2.5-7b-instruct:free, "
+        "meta-llama/llama-3.2-3b-instruct:free"
+    )
 
     ollama_model: str = "llama3.1:8b"
     ollama_host: str = "http://localhost:11434"

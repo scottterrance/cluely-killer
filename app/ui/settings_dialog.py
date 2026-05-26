@@ -102,10 +102,16 @@ class SettingsDialog(QDialog):
         f.addRow(QLabel(
             "<b>OpenRouter (cloud, fewer IP blocks than Groq)</b>"
             "<br><i>Free key at <code>https://openrouter.ai/keys</code>. "
-            "Free models end in <code>:free</code>.</i>"
+            "Free models end in <code>:free</code>. "
+            "<b>Comma-separate multiple models</b> for automatic fallback on rate-limit "
+            "(the free tier of any single model is hit hard).</i>"
         ))
+        self.openrouter_model.setToolTip(
+            "Comma-separated list of model ids. The provider tries each in order "
+            "and falls through to the next on HTTP 429 (rate-limit)."
+        )
         f.addRow("API key:", self.openrouter_key)
-        f.addRow("Model:", self.openrouter_model)
+        f.addRow("Model(s):", self.openrouter_model)
         f.addRow(QLabel("<b>Ollama (local model)</b>"))
         f.addRow("Model:", self.ollama_model)
         f.addRow("Host:", self.ollama_host)
