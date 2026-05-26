@@ -35,26 +35,6 @@ lazy_hidden = [
     "lxml.etree",
 ]
 
-# Walk ./models/ and emit a (src, dst) tuple per file. The destination
-# path is relative to the .exe's folder, so models/ ends up next to
-# cluely-killer.exe in the dist folder. run.py points HF cache at that
-# location.
-def _bundle_models():
-    out = []
-    if not os.path.isdir("models"):
-        print("[spec] WARNING: ./models/ not found - the .exe will not have a")
-        print("[spec]          bundled model and will fail at startup. Run")
-        print("[spec]          setup-model.ps1 first to populate ./models/.")
-        return out
-    for root, _dirs, files in os.walk("models"):
-        for f in files:
-            src = os.path.join(root, f)
-            dst = os.path.dirname(src)  # preserves models/.../ structure
-            out.append((src, dst))
-    print(f"[spec] bundling {len(out)} model files from ./models/")
-    return out
-
-
 excludes = [
     "tkinter", "matplotlib", "scipy", "pandas", "PIL",
     "PySide2", "PySide6", "PyQt5",
@@ -70,7 +50,12 @@ a = Analysis(
         *fwhisper_data,
         *ct2_data,
         *soundcard_data,
-        *_bundle_models(),
+        # NOTE: ./models/ is intentionally NOT bundled here. PyInstaller
+        # 6.x stuffs `datas` into _internal/ which breaks our flat path
+        # lookup, and large binary files (model.bin is ~461 MB) sometimes
+        # get silently dropped by COLLECT. build.bat copies ./models/
+        # next to the .exe via xcopy AFTER PyInstaller finishes - simpler
+        # and 100% predictable.
     ],
     hiddenimports=[
         *fwhisper_hidden,
