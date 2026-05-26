@@ -53,12 +53,16 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["groq", "ollama"])
+        self.provider_combo.addItems(["groq", "openrouter", "ollama"])
         self.provider_combo.setCurrentText(self.settings.provider)
 
         self.groq_key = QLineEdit(self.settings.groq_api_key)
         self.groq_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.groq_model = QLineEdit(self.settings.groq_model)
+
+        self.openrouter_key = QLineEdit(self.settings.openrouter_api_key)
+        self.openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openrouter_model = QLineEdit(self.settings.openrouter_model)
 
         self.ollama_model = QLineEdit(self.settings.ollama_model)
         self.ollama_host = QLineEdit(self.settings.ollama_host)
@@ -67,6 +71,13 @@ class SettingsDialog(QDialog):
         f.addRow(QLabel("<b>Groq (cloud, fast, free tier)</b>"))
         f.addRow("API key:", self.groq_key)
         f.addRow("Model:", self.groq_model)
+        f.addRow(QLabel(
+            "<b>OpenRouter (cloud, fewer IP blocks than Groq)</b>"
+            "<br><i>Free key at <code>https://openrouter.ai/keys</code>. "
+            "Free models end in <code>:free</code>.</i>"
+        ))
+        f.addRow("API key:", self.openrouter_key)
+        f.addRow("Model:", self.openrouter_model)
         f.addRow(QLabel("<b>Ollama (local model)</b>"))
         f.addRow("Model:", self.ollama_model)
         f.addRow("Host:", self.ollama_host)
@@ -165,6 +176,8 @@ class SettingsDialog(QDialog):
         s.provider = self.provider_combo.currentText()
         s.groq_api_key = self.groq_key.text().strip()
         s.groq_model = self.groq_model.text().strip()
+        s.openrouter_api_key = self.openrouter_key.text().strip()
+        s.openrouter_model = self.openrouter_model.text().strip()
         s.ollama_model = self.ollama_model.text().strip()
         s.ollama_host = self.ollama_host.text().strip()
 

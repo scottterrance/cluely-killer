@@ -16,10 +16,13 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 @dataclass
 class Settings:
     # ---- LLM provider ----
-    provider: str = "groq"  # "groq" or "ollama"
+    provider: str = "groq"  # "groq" | "openrouter" | "ollama"
 
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
+
+    openrouter_api_key: str = ""
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
 
     ollama_model: str = "llama3.1:8b"
     ollama_host: str = "http://localhost:11434"

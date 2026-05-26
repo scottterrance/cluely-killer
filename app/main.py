@@ -72,6 +72,11 @@ def main() -> None:
         settings.groq_api_key = env_key
         save_settings(settings)
         _say("loaded GROQ_API_KEY from .env")
+    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if or_key and not settings.openrouter_api_key:
+        settings.openrouter_api_key = or_key
+        save_settings(settings)
+        _say("loaded OPENROUTER_API_KEY from .env")
 
     _say("creating QApplication...")
     from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -147,6 +152,7 @@ def main() -> None:
     from .llm.base import LLMProvider
     from .llm.groq_provider import GroqProvider
     from .llm.ollama_provider import OllamaProvider
+    from .llm.openrouter_provider import OpenRouterProvider
     from .prompts.builder import ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
@@ -155,6 +161,8 @@ def main() -> None:
     def _llm_factory(s) -> LLMProvider:
         if s.provider == "ollama":
             return OllamaProvider(model=s.ollama_model, host=s.ollama_host)
+        if s.provider == "openrouter":
+            return OpenRouterProvider(api_key=s.openrouter_api_key, model=s.openrouter_model)
         return GroqProvider(api_key=s.groq_api_key, model=s.groq_model)
 
     def _prompt_for(s, include_example: bool) -> str:
