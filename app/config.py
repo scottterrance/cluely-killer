@@ -16,7 +16,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 @dataclass
 class Settings:
     # ---- LLM provider ----
-    provider: str = "groq"  # "groq" | "openrouter" | "ollama"
+    provider: str = "groq"  # "groq" | "openrouter" | "deepseek" | "ollama"
 
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
@@ -34,6 +34,13 @@ class Settings:
         "openai/gpt-oss-120b:free, "
         "meta-llama/llama-3.2-3b-instruct:free"
     )
+
+    # DeepSeek (cheap paid; key from https://platform.deepseek.com/api_keys).
+    # 'deepseek-chat' (V3) is the default. 'deepseek-reasoner' (R1) is
+    # available too but emits chain-of-thought first so latency is higher.
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
 
     ollama_model: str = "llama3.1:8b"
     ollama_host: str = "http://localhost:11434"

@@ -77,6 +77,20 @@ def main() -> None:
         settings.openrouter_api_key = or_key
         save_settings(settings)
         _say("loaded OPENROUTER_API_KEY from .env")
+    ds_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if ds_key and not settings.deepseek_api_key:
+        settings.deepseek_api_key = ds_key
+        save_settings(settings)
+        _say("loaded DEEPSEEK_API_KEY from .env")
+    # Optional .env overrides for a custom DeepSeek endpoint / model.
+    ds_base = os.getenv("DEEPSEEK_BASE_URL", "").strip()
+    if ds_base:
+        settings.deepseek_base_url = ds_base
+        _say(f"DEEPSEEK_BASE_URL override = {ds_base!r}")
+    ds_model_env = os.getenv("DEEPSEEK_MODEL", "").strip()
+    if ds_model_env:
+        settings.deepseek_model = ds_model_env
+        _say(f"DEEPSEEK_MODEL override = {ds_model_env!r}")
 
     _say("creating QApplication...")
     from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -150,6 +164,7 @@ def main() -> None:
     from .core.history import ConversationHistory
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
+    from .llm.deepseek_provider import DeepSeekProvider
     from .llm.groq_provider import GroqProvider
     from .llm.ollama_provider import OllamaProvider
     from .llm.openrouter_provider import OpenRouterProvider
@@ -163,6 +178,12 @@ def main() -> None:
             return OllamaProvider(model=s.ollama_model, host=s.ollama_host)
         if s.provider == "openrouter":
             return OpenRouterProvider(api_key=s.openrouter_api_key, model=s.openrouter_model)
+        if s.provider == "deepseek":
+            return DeepSeekProvider(
+                api_key=s.deepseek_api_key,
+                model=s.deepseek_model,
+                base_url=s.deepseek_base_url,
+            )
         return GroqProvider(api_key=s.groq_api_key, model=s.groq_model)
 
     def _prompt_for(s, include_example: bool) -> str:

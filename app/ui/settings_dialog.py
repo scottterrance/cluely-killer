@@ -81,7 +81,7 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["groq", "openrouter", "ollama"])
+        self.provider_combo.addItems(["groq", "openrouter", "deepseek", "ollama"])
         self.provider_combo.setCurrentText(self.settings.provider)
 
         self.groq_key = QLineEdit(self.settings.groq_api_key)
@@ -91,6 +91,11 @@ class SettingsDialog(QDialog):
         self.openrouter_key = QLineEdit(self.settings.openrouter_api_key)
         self.openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.openrouter_model = QLineEdit(self.settings.openrouter_model)
+
+        self.deepseek_key = QLineEdit(self.settings.deepseek_api_key)
+        self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.deepseek_model = QLineEdit(self.settings.deepseek_model)
+        self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
 
         self.ollama_model = QLineEdit(self.settings.ollama_model)
         self.ollama_host = QLineEdit(self.settings.ollama_host)
@@ -112,6 +117,15 @@ class SettingsDialog(QDialog):
         )
         f.addRow("API key:", self.openrouter_key)
         f.addRow("Model(s):", self.openrouter_model)
+        f.addRow(QLabel(
+            "<b>DeepSeek (cheap paid, OpenAI-compatible)</b>"
+            "<br><i>Key at <code>https://platform.deepseek.com/api_keys</code>. "
+            "Models: <code>deepseek-chat</code> (V3, fast) or "
+            "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
+        ))
+        f.addRow("API key:", self.deepseek_key)
+        f.addRow("Model:", self.deepseek_model)
+        f.addRow("Base URL:", self.deepseek_base_url)
         f.addRow(QLabel("<b>Ollama (local model)</b>"))
         f.addRow("Model:", self.ollama_model)
         f.addRow("Host:", self.ollama_host)
@@ -392,6 +406,9 @@ class SettingsDialog(QDialog):
         s.groq_model = self.groq_model.text().strip()
         s.openrouter_api_key = self.openrouter_key.text().strip()
         s.openrouter_model = self.openrouter_model.text().strip()
+        s.deepseek_api_key = self.deepseek_key.text().strip()
+        s.deepseek_model = self.deepseek_model.text().strip()
+        s.deepseek_base_url = self.deepseek_base_url.text().strip()
         s.ollama_model = self.ollama_model.text().strip()
         s.ollama_host = self.ollama_host.text().strip()
 
