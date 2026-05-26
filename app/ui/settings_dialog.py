@@ -79,7 +79,28 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _provider_tab(self) -> QWidget:
         w = QWidget()
-        f = QFormLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # Header row: lock-state hint + Edit toggle button. Provider fields
+        # are read-only by default to prevent a stray click from wiping a
+        # paid API key. User must click Edit to change anything.
+        header = QHBoxLayout()
+        self.edit_lock_label = QLabel(
+            "<i>Provider settings are read-only. Click <b>Edit</b> to change them.</i>"
+        )
+        header.addWidget(self.edit_lock_label)
+        header.addStretch()
+        self.edit_btn = QPushButton("Edit")
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.toggled.connect(self._on_edit_toggled)
+        header.addWidget(self.edit_btn)
+        outer.addLayout(header)
+
+        # Form body
+        form_w = QWidget()
+        f = QFormLayout(form_w)
+
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(["groq", "openrouter", "deepseek", "ollama"])
         self.provider_combo.setCurrentText(self.settings.provider)
@@ -129,7 +150,36 @@ class SettingsDialog(QDialog):
         f.addRow(QLabel("<b>Ollama (local model)</b>"))
         f.addRow("Model:", self.ollama_model)
         f.addRow("Host:", self.ollama_host)
+        outer.addWidget(form_w)
+
+        # Track every editable widget on the provider tab so we can flip
+        # all of them between locked / unlocked as a group.
+        self._provider_inputs = [
+            self.provider_combo,
+            self.groq_key, self.groq_model,
+            self.openrouter_key, self.openrouter_model,
+            self.deepseek_key, self.deepseek_model, self.deepseek_base_url,
+            self.ollama_model, self.ollama_host,
+        ]
+        # Locked by default. Edit toggles unlock state.
+        self._set_provider_locked(True)
         return w
+
+    def _on_edit_toggled(self, edit_on: bool) -> None:
+        self._set_provider_locked(not edit_on)
+        self.edit_btn.setText("Done" if edit_on else "Edit")
+        self.edit_lock_label.setText(
+            "<i>Editing - changes commit when you click <b>Save</b> below.</i>"
+            if edit_on else
+            "<i>Provider settings are read-only. Click <b>Edit</b> to change them.</i>"
+        )
+
+    def _set_provider_locked(self, locked: bool) -> None:
+        # setEnabled(False) on a QLineEdit/QComboBox grays it out AND
+        # blocks interaction, but programmatic .text() / .currentText()
+        # still work, so _save() can read the values without unlocking.
+        for w in self._provider_inputs:
+            w.setEnabled(not locked)
 
     def _context_tab(self) -> QWidget:
         w = QWidget()
@@ -338,7 +388,13 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.whisper_model_combo = QComboBox()
-        self.whisper_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
+        # large-v3-turbo: distilled from Large-V3 by OpenAI in 2024.
+        # ~6-8x faster than Large-V3 at the same English accuracy.
+        # 1.5 GB on disk vs 466 MB for `small`; ~+1-3s on CPU per
+        # transcribe but noticeably better on technical jargon and accents.
+        self.whisper_model_combo.addItems(
+            ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+        )
         self.whisper_model_combo.setCurrentText(self.settings.whisper_model)
 
         self.whisper_compute_combo = QComboBox()
