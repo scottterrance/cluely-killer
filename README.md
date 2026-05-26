@@ -82,3 +82,43 @@ All of them are reconfigurable in the Settings → Hotkeys tab.
 3. In the app: `Ctrl+Shift+S` → AI Provider → switch to **ollama** → Save.
 
 No keys, no cloud, no telemetry.
+
+---
+
+## Build a standalone `.exe` (Windows, PyInstaller)
+
+Bundle the entire app (Python runtime + Qt + faster-whisper + ctranslate2
++ soundcard + all your code) into a single folder you can copy to any
+Windows machine with no Python installed.
+
+```powershell
+.\build.bat
+```
+
+Output: `dist\cluely-killer\cluely-killer.exe`. First build takes ~3-5
+minutes (PyInstaller statically scans every dependency); subsequent
+builds are faster.
+
+To distribute:
+
+1. Zip the entire `dist\cluely-killer\` folder (~250-300 MB).
+2. Send to the target machine.
+3. They unzip and double-click `cluely-killer.exe`.
+
+Notes:
+
+- **Whisper model is NOT bundled.** It downloads to
+  `%USERPROFILE%\.cache\huggingface\` on first run (~466 MB), exactly
+  like the dev install does. We disable Hugging Face's `hf_xet` Rust
+  downloader to avoid a `STATUS_ILLEGAL_INSTRUCTION` crash on hypervisor
+  CPUs.
+- **Ollama is NOT bundled either.** If the target machine wants the
+  local-model path, install Ollama separately from https://ollama.com.
+- **Windows SmartScreen** will warn the first time the .exe runs because
+  it's unsigned. Click "More info" → "Run anyway".
+- **Microsoft Defender** sometimes flags PyInstaller-built .exes as
+  generic-trojan. This is a well-known false positive; the real fix is
+  code-signing, which is out of scope.
+- The first build's spec is `cluely-killer.spec`. To produce a release
+  build with no terminal window, edit `console=True` to `console=False`
+  in the spec and rebuild.

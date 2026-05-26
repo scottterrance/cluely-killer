@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# --- cluely-killer specific ---
+# The default Python .gitignore above excludes *.spec; whitelist ours
+# so PyInstaller picks it up on every machine that runs build.bat.
+!cluely-killer.spec
