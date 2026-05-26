@@ -41,7 +41,7 @@ def _friendly_error(exc: BaseException) -> str:
         return "Network error reaching the LLM. Check your connection."
     # Ollama-specific: model not pulled yet
     if "model" in low and ("not found" in low or "404" in msg):
-        return "Ollama model not found. Run e.g.  ollama pull llama3.1:8b"
+        return "Model not found. For Ollama, run e.g.  ollama pull llama3.1:8b"
     return f"{cls}: {msg}"[:200]
 
 
@@ -103,35 +103,71 @@ class Controller(QObject):
                 self.error.emit("No speech detected in the last window.")
                 return
             self.transcript_ready.emit(transcript)
+            print(f"[answer] transcript: {transcript[:200]!r}", flush=True)
 
             self.status.emit("Thinking...")
             include_example = self.scheduler.should_include()
             system_prompt = self.prompt_builder(self.settings, include_example)
             llm = self.llm_factory(self.settings)
             prior = self.history.as_messages()
+            print(
+                f"[answer] provider={self.settings.provider} "
+                f"history_turns={len(prior)//2}",
+                flush=True,
+            )
 
             self.answer_started.emit()
             chunks: list[str] = []
+            err_msg: str | None = None
             try:
                 for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
                     chunks.append(chunk)
                     self.answer_chunk.emit(chunk)
             except Exception as e:
-                # Show actionable status text. Keep partial answer visible so
-                # the candidate sees what they got before the failure.
                 traceback.print_exc()
-                self.error.emit(_friendly_error(e))
-                return
-            finally:
-                self.answer_finished.emit()
+                err_msg = _friendly_error(e)
 
             full = "".join(chunks).strip()
-            # Don't poison the memory with non-answers.
-            if full and full.upper() != "SKIP":
+            print(
+                f"[answer] streamed {len(chunks)} chunks, "
+                f"{len(full)} chars, err={err_msg!r}",
+                flush=True,
+            )
+
+            # Decide what to surface. Critical: never leave the answer panel
+            # silently empty - the candidate has no idea what happened
+            # otherwise.
+            fallback: str | None = None
+            if err_msg:
+                fallback = f"\u26a0  {err_msg}"
+            elif not full:
+                fallback = (
+                    "\u26a0  The LLM returned an empty response. "
+                    "Check your API key / quota / model name in Settings -> AI Provider, "
+                    "or switch to a different provider."
+                )
+            elif full.upper() == "SKIP":
+                fallback = (
+                    "\u26a0  The model output 'SKIP' - it judged the transcribed text as not a "
+                    "clear question. Press Ctrl+R to clear, then Ctrl+Space again right after "
+                    "the interviewer finishes speaking."
+                )
+
+            if fallback:
+                # If chunks already arrived, append the warning. If the panel
+                # is empty, the warning IS the visible content.
+                separator = "\n\n" if chunks else ""
+                self.answer_chunk.emit(separator + fallback)
+
+            self.answer_finished.emit()
+
+            # Only real answers go in memory.
+            if not err_msg and full and full.upper() != "SKIP":
                 self.history.add(transcript, full)
                 self.history_changed.emit(len(self.history))
-
-            self.status.emit("Ready")
+                self.status.emit("Ready")
+            else:
+                self.status.emit("See answer panel - non-success outcome.")
         except Exception as e:
             traceback.print_exc()
             self.error.emit(_friendly_error(e))

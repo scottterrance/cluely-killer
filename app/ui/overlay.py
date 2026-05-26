@@ -182,6 +182,17 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
+        # --- Loud warning when stealth is OFF (interviewer can see this) ---
+        # Hidden when stealth is active so the overlay stays unobtrusive.
+        self.stealth_warning = QLabel(
+            "\u26a0  STEALTH OFF \u2014 the interviewer's screen-share WILL show this overlay. "
+            "Open Settings (\u2699) \u2192 Window \u2192 'Hide window from screen capture'."
+        )
+        self.stealth_warning.setObjectName("stealthWarning")
+        self.stealth_warning.setWordWrap(True)
+        self.stealth_warning.setVisible(False)
+        v.addWidget(self.stealth_warning)
+
         # --- Question / transcript ---
         self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
         self.question_label.setObjectName("question")
@@ -222,12 +233,14 @@ class OverlayWindow(QWidget):
                 "STEALTH ON - hidden from Zoom / Teams / Meet / OBS screen capture."
             )
             self.stealth_label.setProperty("alarm", "false")
+            self.stealth_warning.setVisible(False)
         else:
             self.stealth_label.setText("VISIBLE")
             self.stealth_label.setToolTip(
                 "STEALTH OFF - the interviewer WILL see this overlay if you share your screen!"
             )
             self.stealth_label.setProperty("alarm", "true")
+            self.stealth_warning.setVisible(True)
         # Re-evaluate the [alarm] style selector.
         self.stealth_label.style().unpolish(self.stealth_label)
         self.stealth_label.style().polish(self.stealth_label)
