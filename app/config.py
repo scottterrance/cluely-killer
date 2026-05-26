@@ -71,7 +71,17 @@ class Settings:
     job_description: str = ""
     custom_system_prompt: str = ""
 
-    # ---- Window / stealth ----
+    # ---- Window / stealth / branding ----
+    # The string used everywhere the app's name appears: window titles,
+    # tray tooltip, Qt application name (visible in Task Manager when
+    # running under PyInstaller), and OpenRouter HTTP header fingerprints.
+    # Rename to e.g. "Notepad" or "Project Notes" so a screen-share peek
+    # at the taskbar / tray doesn't immediately read "cluely-killer".
+    # Note: the .exe filename is set at build time in cluely-killer.spec;
+    # change `name="cluely-killer"` there if you want Task Manager to
+    # show a different process name.
+    app_display_name: str = "cluely-killer"
+
     # ON by default: the whole point of the app is that the interviewer
     # can't see the overlay during a screen share. We removed the
     # WA_TranslucentBackground attribute that used to break rendering on

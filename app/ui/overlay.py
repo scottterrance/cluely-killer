@@ -76,7 +76,7 @@ class OverlayWindow(QWidget):
     def _setup_window(self) -> None:
         self.setObjectName("OverlayRoot")
         if self.simple_mode:
-            self.setWindowTitle("cluely-killer")
+            self.setWindowTitle(self.settings.app_display_name or "cluely-killer")
             self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         else:
             self.setWindowFlags(
@@ -175,7 +175,7 @@ class OverlayWindow(QWidget):
         self.quit_btn = QPushButton("\u00d7")
         self.quit_btn.setObjectName("iconBtn")
         self.quit_btn.setFixedSize(26, 26)
-        self.quit_btn.setToolTip("Quit cluely-killer")
+        self.quit_btn.setToolTip(f"Quit {self.settings.app_display_name or 'cluely-killer'}")
         self.quit_btn.clicked.connect(lambda: self.on_quit())
         header.addWidget(self.quit_btn)
 

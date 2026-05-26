@@ -26,10 +26,16 @@ import httpx
 from .base import LLMProvider
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-# Recommended HTTP headers per OpenRouter docs - they're optional but
-# unlock per-app analytics on your dashboard and are good citizenship.
-_REFERER = "https://github.com/scottterrance/cluely-killer"
-_TITLE = "cluely-killer"
+# OpenRouter accepts optional `HTTP-Referer` and `X-Title` headers for
+# per-app analytics on their dashboard. We DELIBERATELY leave them empty
+# now: any string here would be a network-level fingerprint that
+# identifies the app to anyone inspecting outbound HTTPS metadata
+# (corporate firewall, monitoring proxy). The user can opt back in by
+# editing this file or by setting them via OPENROUTER_HTTP_REFERER /
+# OPENROUTER_X_TITLE env vars before launch if they want analytics.
+import os as _os
+_REFERER = _os.getenv("OPENROUTER_HTTP_REFERER", "")
+_TITLE = _os.getenv("OPENROUTER_X_TITLE", "")
 
 
 class _SkipModel(Exception):
@@ -130,9 +136,13 @@ class OpenRouterProvider(LLMProvider):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": _REFERER,
-            "X-Title": _TITLE,
         }
+        # Only attach app-fingerprint headers if the user explicitly
+        # opted in via env vars (default empty = no fingerprint).
+        if _REFERER:
+            headers["HTTP-Referer"] = _REFERER
+        if _TITLE:
+            headers["X-Title"] = _TITLE
         body = {
             "model": model,
             "messages": msgs,

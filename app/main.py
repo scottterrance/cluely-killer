@@ -114,7 +114,11 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("cluely-killer")
+    # Use the user-configurable display name everywhere it surfaces. By
+    # default this is "cluely-killer" but the user can rename it to
+    # something innocuous (e.g. "Notepad") so a peek at the taskbar /
+    # Task Manager doesn't out them.
+    app.setApplicationName(settings.app_display_name or "cluely-killer")
 
     # Make Ctrl+C in the terminal actually quit the app. Qt's C++ event
     # loop blocks Python signal delivery; the QTimer below wakes Python
@@ -302,7 +306,7 @@ def main() -> None:
     tray = None
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(_make_tray_icon())
-        tray.setToolTip("cluely-killer")
+        tray.setToolTip(settings.app_display_name or "cluely-killer")
         tray_menu = QMenu()
         tray_menu.addAction("Show / hide overlay", overlay.toggle_visibility)
         tray_menu.addAction("Settings...", open_settings_dialog)

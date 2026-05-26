@@ -48,7 +48,7 @@ class SettingsDialog(QDialog):
         # repopulation so we don't trigger spurious field overwrites.
         self._suppress_persona_signal = False
 
-        self.setWindowTitle("cluely-killer - Settings")
+        self.setWindowTitle(f"{settings.app_display_name or 'cluely-killer'} - Settings")
         self.resize(680, 620)
 
         tabs = QTabWidget()
@@ -441,6 +441,14 @@ class SettingsDialog(QDialog):
     def _window_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
+        self.app_name_edit = QLineEdit(self.settings.app_display_name)
+        self.app_name_edit.setToolTip(
+            "Name shown in window titles, system tray tooltip, and Task Manager. "
+            "Rename to something generic (e.g. 'Notepad', 'Project Notes') so a "
+            "glance at the taskbar doesn't out you. Restart the app for the "
+            "Task-Manager process name to update (or rebuild via build.bat with "
+            "a renamed cluely-killer.spec)."
+        )
         self.exclude_check = QCheckBox("Hide window from screen capture (Windows 10 build 19041+)")
         self.exclude_check.setChecked(self.settings.exclude_from_capture)
 
@@ -450,8 +458,14 @@ class SettingsDialog(QDialog):
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setValue(self.settings.opacity)
 
+        f.addRow("App display name:", self.app_name_edit)
         f.addRow(self.exclude_check)
         f.addRow("Opacity:", self.opacity_spin)
+        f.addRow(QLabel(
+            "<i>Display name affects window titles + tray tooltip immediately. "
+            "Task Manager process name only changes after restart "
+            "(and the .exe filename is set at PyInstaller build time).</i>"
+        ))
         return w
 
     # ------------------------------------------------------------------
@@ -486,6 +500,7 @@ class SettingsDialog(QDialog):
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())
+        s.app_display_name = self.app_name_edit.text().strip() or "cluely-killer"
 
         # Sync the active persona with whatever's now in the boxes so
         # personas always reflect what the user just committed.
