@@ -20,6 +20,31 @@ from ..stt.whisper_engine import WhisperEngine
 from .history import ConversationHistory
 
 
+def _friendly_error(exc: BaseException) -> str:
+    """Translate common provider errors into a one-line actionable hint."""
+    cls = type(exc).__name__
+    msg = str(exc)
+    low = msg.lower()
+    # Groq / OpenAI-compatible HTTP errors put the status code in the message,
+    # e.g. "Error code: 403 - {...}".
+    if "403" in msg or cls == "PermissionDeniedError" or "access denied" in low:
+        return (
+            "Provider blocked your IP (HTTP 403). Many cloud / VPS IP ranges "
+            "are blocked by Groq's WAF. Open Settings -> AI Provider and "
+            "switch to 'ollama' (local model)."
+        )
+    if "401" in msg or cls == "AuthenticationError" or "invalid api key" in low:
+        return "API key is invalid or revoked. Check Settings -> AI Provider."
+    if "429" in msg or cls == "RateLimitError" or "rate limit" in low:
+        return "Rate limit hit. Wait a minute, or switch provider in Settings."
+    if cls in ("APIConnectionError", "ConnectionError") or "connection" in low:
+        return "Network error reaching the LLM. Check your connection."
+    # Ollama-specific: model not pulled yet
+    if "model" in low and ("not found" in low or "404" in msg):
+        return "Ollama model not found. Run e.g.  ollama pull llama3.1:8b"
+    return f"{cls}: {msg}"[:200]
+
+
 class Controller(QObject):
     # UI signals
     transcript_ready = pyqtSignal(str)
@@ -87,10 +112,18 @@ class Controller(QObject):
 
             self.answer_started.emit()
             chunks: list[str] = []
-            for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
-                chunks.append(chunk)
-                self.answer_chunk.emit(chunk)
-            self.answer_finished.emit()
+            try:
+                for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
+                    chunks.append(chunk)
+                    self.answer_chunk.emit(chunk)
+            except Exception as e:
+                # Show actionable status text. Keep partial answer visible so
+                # the candidate sees what they got before the failure.
+                traceback.print_exc()
+                self.error.emit(_friendly_error(e))
+                return
+            finally:
+                self.answer_finished.emit()
 
             full = "".join(chunks).strip()
             # Don't poison the memory with non-answers.
@@ -101,6 +134,6 @@ class Controller(QObject):
             self.status.emit("Ready")
         except Exception as e:
             traceback.print_exc()
-            self.error.emit(f"{type(e).__name__}: {e}")
+            self.error.emit(_friendly_error(e))
         finally:
             self._busy.release()
