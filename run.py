@@ -9,44 +9,40 @@ Run from the project root:
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# CRITICAL: configure Hugging Face Hub BEFORE faster-whisper imports it.
+# Pre-import setup. Must run BEFORE faster-whisper / huggingface_hub
+# import anything.
 #
-# This build ships the Whisper 'small' model INSIDE the project folder
-# (at models/hf-cache/). On launch we point HF_HOME at that bundled
-# folder and force HF_HUB_OFFLINE=1 so faster-whisper:
-#   - never makes a network call to huggingface.co
-#   - never shows a "downloading" progress bar
-#   - never fails on flaky WiFi or DNS
-# It just loads the local model and starts.
+# Strategy: skip HuggingFace entirely. The Whisper model lives in a flat
+# directory at <app_dir>/models/whisper-<size>/ (populated by
+# setup-model.ps1 in dev, bundled into dist/ at build time). The
+# WhisperEngine reads CLUELY_APP_DIR to find that folder and passes the
+# directory path directly to faster-whisper, which loads model.bin /
+# config.json / tokenizer.json without ever calling huggingface.co.
 #
-# Also disables hf_xet (Rust accelerator that crashes on hypervisor CPUs)
-# and the metadata progress bars.
+# We still set HF_HUB_OFFLINE=1 + the no-progress-bars / no-telemetry
+# flags as defence-in-depth in case anything inside faster-whisper or
+# its deps tries an opportunistic HF lookup.
 # ---------------------------------------------------------------------------
 import os
 import sys
 from pathlib import Path
 
-# Where the .exe (or run.py in dev) lives. The bundled model sits next
-# to it under models/hf-cache/.
 if getattr(sys, "frozen", False):
     _APP_DIR = Path(sys.executable).parent
 else:
     _APP_DIR = Path(__file__).resolve().parent
 
-_BUNDLED_HF_CACHE = _APP_DIR / "models" / "hf-cache"
-_BUNDLED_HF_HUB = _BUNDLED_HF_CACHE / "hub"
+os.environ["CLUELY_APP_DIR"] = str(_APP_DIR)
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-os.environ["HF_HOME"] = str(_BUNDLED_HF_CACHE)
-os.environ["HUGGINGFACE_HUB_CACHE"] = str(_BUNDLED_HF_HUB)
-os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-print(f"[startup] using bundled HF cache at: {_BUNDLED_HF_HUB}", flush=True)
-print("[startup] HF offline mode forced - no network, no downloads.", flush=True)
+print(f"[startup] app dir: {_APP_DIR}", flush=True)
+print(f"[startup] looking for bundled model under: {_APP_DIR / 'models'}", flush=True)
 
 import faulthandler
 import traceback
