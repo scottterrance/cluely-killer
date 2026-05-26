@@ -1,16 +1,20 @@
 """OpenRouter cloud provider with automatic fallback chain.
 
-OpenRouter's free-tier models (`...:free`) get rate-limited upstream
-all the time, especially the popular ones (llama-3.3-70b is the worst
-because every free user on Earth points at it). Mid-interview that
-would be fatal, so the provider accepts a comma-separated list of
-models and tries each in order. On HTTP 429 from one model we silently
-fall through to the next; only when the whole chain is exhausted do
-we surface the rate-limit error to the candidate.
+OpenRouter's free-tier models (`...:free`) fail in two common ways:
+  1. Rate-limited upstream (HTTP 429, especially the popular ones like
+     llama-3.3-70b which every free user on Earth points at).
+  2. Quietly removed (HTTP 404 'No endpoints found' - the free model
+     list rotates, gemma-2-9b-it disappeared this way).
+
+For an interview tool either one is fatal if it stops the chain. So the
+provider takes a comma-separated list of model ids and treats ANY
+non-success outcome on a single model as a "skip this one" signal,
+falling through to the next. Only when the whole chain is exhausted
+do we surface the last error to the candidate.
 
 Model field examples:
   meta-llama/llama-3.3-70b-instruct:free
-  meta-llama/llama-3.3-70b-instruct:free, google/gemma-2-9b-it:free
+  qwen/qwen3-next-80b-a3b-instruct:free, deepseek/deepseek-v4-flash:free
 """
 from __future__ import annotations
 
@@ -28,8 +32,17 @@ _REFERER = "https://github.com/scottterrance/cluely-killer"
 _TITLE = "cluely-killer"
 
 
-class _RateLimited(Exception):
-    """Internal sentinel: this model is 429, try the next one."""
+class _SkipModel(Exception):
+    """Internal sentinel: this model failed pre-content; try the next one.
+
+    Carries a short human-readable reason so the exhausted-chain error
+    message can tell the user which kind of failure they're hitting
+    (rate-limit, model removed, server error, etc.).
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _split_models(spec: str | list[str]) -> list[str]:
@@ -38,11 +51,27 @@ def _split_models(spec: str | list[str]) -> list[str]:
     return [m.strip() for m in spec if m and m.strip()]
 
 
+def _classify_status(status: int, body: str) -> str:
+    """One-line description of why a non-200 response is unusable."""
+    low = body.lower()
+    if status == 429 or '"code":429' in body or "rate-limited" in low:
+        return f"rate-limited (HTTP {status})"
+    if status == 404 or "no endpoints found" in low:
+        return f"model not found / removed (HTTP {status})"
+    if status == 401:
+        return "API key invalid (HTTP 401)"
+    if status == 403:
+        return "forbidden (HTTP 403)"
+    if 500 <= status < 600:
+        return f"upstream server error (HTTP {status})"
+    return f"HTTP {status}: {body[:120]}"
+
+
 class OpenRouterProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str | list[str] = "meta-llama/llama-3.3-70b-instruct:free",
+        model: str | list[str] = "qwen/qwen3-next-80b-a3b-instruct:free",
         base_url: str = DEFAULT_BASE_URL,
     ):
         if not api_key:
@@ -70,27 +99,30 @@ class OpenRouterProvider(LLMProvider):
             msgs.extend(prior_messages)
         msgs.append({"role": "user", "content": user_message})
 
+        last_reason = "no models tried"
         for i, model in enumerate(self.models):
             try:
                 yield from self._stream_one(model, msgs)
                 return  # success - first model that responds wins
-            except _RateLimited:
+            except _SkipModel as e:
+                last_reason = e.reason
                 remaining = self.models[i + 1:]
                 if remaining:
                     print(
-                        f"[openrouter] {model!r} rate-limited; "
+                        f"[openrouter] {model!r} -> {e.reason}; "
                         f"falling back to {remaining[0]!r}",
                         flush=True,
                     )
                     continue
-                # Whole chain exhausted - surface as the standard 429 so the
-                # controller's _friendly_error maps it to the 'Rate limit'
-                # status hint.
+                # Whole chain exhausted. Surface a 429-flavoured RuntimeError
+                # so the controller's _friendly_error maps it to the standard
+                # rate-limit hint when that's what dominated.
                 raise RuntimeError(
                     f"OpenRouter HTTP 429: all {len(self.models)} model"
-                    f"{'s' if len(self.models) != 1 else ''} in your fallback chain "
-                    f"are rate-limited. Add more comma-separated models in Settings, "
-                    f"wait a minute, or switch provider."
+                    f"{'s' if len(self.models) != 1 else ''} in your fallback chain failed. "
+                    f"Last reason: {last_reason}. "
+                    f"Edit the comma-separated model list in Settings -> AI Provider, "
+                    f"wait a minute, or switch provider (Ollama works offline)."
                 )
 
     # ------------------------------------------------------------------
@@ -109,55 +141,71 @@ class OpenRouterProvider(LLMProvider):
             "max_tokens": 400,
             "top_p": 0.95,
         }
-        with httpx.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=body,
-            timeout=httpx.Timeout(60.0, connect=10.0),
-        ) as response:
-            if response.status_code == 429:
-                try:
-                    response.read()
-                except Exception:
-                    pass
-                raise _RateLimited(model)
+        try:
+            response_ctx = httpx.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            )
+        except httpx.RequestError as e:
+            raise _SkipModel(f"connect failed: {type(e).__name__}: {e}")
+
+        yielded_any = False
+        with response_ctx as response:
+            # ---- Pre-content checks: any non-200 -> skip this model ----
             if response.status_code != 200:
-                payload = response.read().decode("utf-8", errors="replace")
-                # OpenRouter sometimes wraps a 429 from upstream in a 200
-                # with an error payload, or surfaces it via 'Provider
-                # returned error' text. Treat those as rate-limited too.
-                low = payload.lower()
-                if '"code":429' in payload or "rate-limited" in low:
-                    raise _RateLimited(model)
-                raise RuntimeError(
-                    f"OpenRouter HTTP {response.status_code} ({model}): {payload[:300]}"
-                )
-            for raw in response.iter_lines():
-                if not raw or raw.startswith(":"):
-                    continue
-                if not raw.startswith("data:"):
-                    continue
-                data = raw[5:].strip()
-                if data == "[DONE]":
-                    break
                 try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                # Body-level error inside the SSE stream.
-                if isinstance(obj, dict) and "error" in obj:
-                    err = obj["error"]
-                    if isinstance(err, dict):
-                        if err.get("code") == 429:
-                            raise _RateLimited(model)
+                    body_text = response.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body_text = ""
+                raise _SkipModel(_classify_status(response.status_code, body_text))
+
+            # ---- 200 OK; iterate the SSE body ----
+            try:
+                for raw in response.iter_lines():
+                    if not raw or raw.startswith(":"):
+                        continue
+                    if not raw.startswith("data:"):
+                        continue
+                    data = raw[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    # OpenRouter sometimes wraps an upstream failure as a
+                    # 200 OK with the error inlined in the SSE body.
+                    if isinstance(obj, dict) and "error" in obj:
+                        err = obj["error"]
+                        if isinstance(err, dict):
+                            err_code = err.get("code")
+                            err_msg = err.get("message", str(err))
+                        else:
+                            err_code = None
+                            err_msg = str(err)
+                        if not yielded_any:
+                            # Pre-content: safe to fall back.
+                            raise _SkipModel(
+                                f"in-stream error code={err_code}: {err_msg[:140]}"
+                            )
+                        # Mid-stream failure: we already showed the user
+                        # partial output, can't fall back without dupes.
                         raise RuntimeError(
-                            f"OpenRouter ({model}): {err.get('message', err)}"
+                            f"OpenRouter ({model}) mid-stream error: {err_msg}"
                         )
-                    raise RuntimeError(f"OpenRouter ({model}): {err}")
-                try:
-                    delta = obj["choices"][0]["delta"].get("content") or ""
-                except (KeyError, IndexError, TypeError):
-                    continue
-                if delta:
-                    yield delta
+                    try:
+                        delta = obj["choices"][0]["delta"].get("content") or ""
+                    except (KeyError, IndexError, TypeError):
+                        continue
+                    if delta:
+                        yielded_any = True
+                        yield delta
+            except httpx.RequestError as e:
+                if yielded_any:
+                    raise RuntimeError(
+                        f"OpenRouter ({model}) connection lost mid-stream: {e}"
+                    )
+                raise _SkipModel(f"connection error: {type(e).__name__}: {e}")

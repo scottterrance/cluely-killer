@@ -22,13 +22,16 @@ class Settings:
     groq_model: str = "llama-3.3-70b-versatile"
 
     openrouter_api_key: str = ""
-    # Comma-separated fallback chain. The provider tries each in order on
-    # HTTP 429 - the popular llama-3.3-70b free tier is rate-limited often.
+    # Comma-separated fallback chain. The provider tries each in order;
+    # any non-200 response (rate-limit, model removed, server error)
+    # silently falls through to the next model. The free model list on
+    # OpenRouter rotates - check https://openrouter.ai/models?max_price=0
+    # for the current set if you ever see "all N models failed".
     openrouter_model: str = (
+        "qwen/qwen3-next-80b-a3b-instruct:free, "
+        "deepseek/deepseek-v4-flash:free, "
         "meta-llama/llama-3.3-70b-instruct:free, "
-        "google/gemma-2-9b-it:free, "
-        "mistralai/mistral-7b-instruct:free, "
-        "qwen/qwen-2.5-7b-instruct:free, "
+        "openai/gpt-oss-120b:free, "
         "meta-llama/llama-3.2-3b-instruct:free"
     )
 
