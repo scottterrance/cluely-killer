@@ -1,15 +1,19 @@
 """Settings dialog. Tabbed: Provider, Context, Audio/STT, Hotkeys, Window."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTabWidget,
     QTextEdit,
@@ -18,6 +22,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..config import Settings
+from ..utils.extract import extract_text
+from .drop_text_edit import DropZoneTextEdit
 
 
 class SettingsDialog(QDialog):
@@ -91,20 +97,72 @@ class SettingsDialog(QDialog):
         self.about_edit.setMaximumHeight(70)
         v.addWidget(self.about_edit)
 
-        v.addWidget(QLabel("Resume (paste plain text):"))
-        self.resume_edit = QTextEdit(self.settings.resume_text)
+        # Resume row: label + Import button on the right.
+        resume_row = QHBoxLayout()
+        resume_row.addWidget(QLabel("Resume:"))
+        resume_row.addStretch()
+        resume_import_btn = QPushButton("Import .pdf / .docx / .txt...")
+        resume_import_btn.setToolTip("Pick a file to extract its text into this box.")
+        resume_import_btn.clicked.connect(lambda: self._import_into(self.resume_edit, "resume"))
+        resume_row.addWidget(resume_import_btn)
+        v.addLayout(resume_row)
+        self.resume_edit = DropZoneTextEdit()
+        self.resume_edit.setPlainText(self.settings.resume_text)
+        self.resume_edit.setPlaceholderText(
+            "Drag a .pdf / .docx / .txt onto this box, or click Import. "
+            "You can also paste plain text."
+        )
         v.addWidget(self.resume_edit)
 
-        v.addWidget(QLabel("Job description:"))
-        self.job_edit = QTextEdit(self.settings.job_description)
+        # Job description row: same pattern.
+        jd_row = QHBoxLayout()
+        jd_row.addWidget(QLabel("Job description:"))
+        jd_row.addStretch()
+        jd_import_btn = QPushButton("Import .pdf / .docx / .txt...")
+        jd_import_btn.clicked.connect(lambda: self._import_into(self.job_edit, "job description"))
+        jd_row.addWidget(jd_import_btn)
+        v.addLayout(jd_row)
+        self.job_edit = DropZoneTextEdit()
+        self.job_edit.setPlainText(self.settings.job_description)
+        self.job_edit.setPlaceholderText(
+            "Drag a .pdf / .docx / .txt onto this box, or click Import."
+        )
         self.job_edit.setMaximumHeight(120)
         v.addWidget(self.job_edit)
 
-        v.addWidget(QLabel("Custom system prompt (advanced — appended to base rules):"))
+        v.addWidget(QLabel("Custom system prompt (advanced - appended to base rules):"))
         self.custom_edit = QTextEdit(self.settings.custom_system_prompt)
         self.custom_edit.setMaximumHeight(80)
         v.addWidget(self.custom_edit)
         return w
+
+    def _import_into(self, target_edit: QTextEdit, label: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Import {label}",
+            "",
+            "Documents (*.pdf *.docx *.txt *.md);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            text = extract_text(path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Import failed",
+                f"Could not read {Path(path).name}:\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        if not text:
+            QMessageBox.information(
+                self,
+                "Empty file",
+                f"{Path(path).name} appears to contain no extractable text.",
+            )
+            return
+        target_edit.setPlainText(text)
 
     def _audio_tab(self) -> QWidget:
         w = QWidget()

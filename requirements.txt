@@ -17,3 +17,7 @@ pynput>=1.7.6
 
 # --- Config / env ---
 python-dotenv>=1.0.0
+
+# --- Resume / JD import (pure-Python wheels, no compiler) ---
+pypdf>=4.0.0
+python-docx>=1.1.0
