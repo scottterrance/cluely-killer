@@ -65,7 +65,10 @@ class Settings:
     window_x: int = -1
     window_y: int = -1
     window_w: int = 580
-    window_h: int = 360
+    # Default height bumped from 360 -> 540 (1.5x). Long answers from
+    # DeepSeek were overflowing the old 360 px panel. The overlay is
+    # still resizable manually if you want it shorter.
+    window_h: int = 540
 
 
 def load_settings() -> Settings:
@@ -73,7 +76,14 @@ def load_settings() -> Settings:
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             allowed = {f.name for f in fields(Settings)}
-            return Settings(**{k: v for k, v in data.items() if k in allowed})
+            s = Settings(**{k: v for k, v in data.items() if k in allowed})
+            # One-time migration: if the user's saved config still has
+            # the old default height (360), bump to the new default
+            # (540). Doesn't override anyone who customized their height.
+            if s.window_h == 360:
+                s.window_h = 540
+                print("[config] migrated window_h 360 -> 540 (one-time bump)")
+            return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")
     return Settings()
