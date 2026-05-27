@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import Settings
+from ..config import Settings, save_settings
 from ..core.personas import DEFAULT_NAME, Persona, PersonaStore
 from ..utils.extract import extract_text
 from .drop_text_edit import DropZoneTextEdit
@@ -106,8 +106,9 @@ class SettingsDialog(QDialog):
         persona_row.addWidget(QLabel("Persona:"))
         self.persona_combo = QComboBox()
         self.persona_combo.setToolTip(
-            "Switch between saved persona presets. "
-            "Clicking the main Save button below also updates the active persona."
+            "Switch between saved persona presets. Picking a persona "
+            "INSTANTLY swaps the about-me / resume / JD / custom prompt "
+            "the LLM will see for the next Ctrl+Space - no Save needed."
         )
         self.persona_combo.currentTextChanged.connect(self._persona_changed)
         persona_row.addWidget(self.persona_combo, stretch=1)
@@ -197,6 +198,30 @@ class SettingsDialog(QDialog):
         self.job_edit.setPlainText(p.job_description)
         self.custom_edit.setPlainText(p.custom_system_prompt)
 
+    def _apply_active_persona_to_runtime(self) -> None:
+        """Mirror the active persona's content into self.settings + persist.
+
+        This is what makes a persona swap take effect immediately without
+        the user having to click Save. The Controller's prompt_builder
+        reads from settings.about_me / resume_text / job_description /
+        custom_system_prompt, so updating those + writing config.json is
+        all it takes for the very next Ctrl+Space to use the new context.
+        """
+        p = self.persona_store.get_active()
+        if p is None:
+            return
+        self.settings.about_me = p.about_me
+        self.settings.resume_text = p.resume_text
+        self.settings.job_description = p.job_description
+        self.settings.custom_system_prompt = p.custom_system_prompt
+        save_settings(self.settings)
+        print(
+            f"[settings] active persona -> {p.name!r}: "
+            f"about={len(p.about_me)} chars, resume={len(p.resume_text)} chars, "
+            f"jd={len(p.job_description)} chars, custom={len(p.custom_system_prompt)} chars",
+            flush=True,
+        )
+
     def _current_persona_from_fields(self, name: str) -> Persona:
         return Persona(
             name=name,
@@ -210,10 +235,15 @@ class SettingsDialog(QDialog):
         if self._suppress_persona_signal or not name:
             return
         # Picking a different persona overwrites the boxes with that
-        # persona's content. Persisted immediately so the choice survives
-        # a Cancel.
+        # persona's content AND immediately copies that content into
+        # settings + writes config.json. The runtime (Controller's
+        # prompt_builder) reads from settings every Ctrl+Space, so
+        # the next answer uses the new persona instantly. No Save
+        # button required - even closing the dialog with Cancel
+        # preserves the swap.
         self.persona_store.set_active(name)
         self._load_active_persona_into_fields()
+        self._apply_active_persona_to_runtime()
 
     def _persona_save_as(self) -> None:
         name, ok = QInputDialog.getText(self, "Save persona", "Name for new persona:")
@@ -232,6 +262,8 @@ class SettingsDialog(QDialog):
         self.persona_store.upsert(self._current_persona_from_fields(name))
         self.persona_store.set_active(name)
         self._populate_persona_dropdown()
+        # Newly-created persona becomes active -> push to runtime.
+        self._apply_active_persona_to_runtime()
 
     def _persona_rename(self) -> None:
         old = self.persona_store.active_name()
@@ -271,6 +303,8 @@ class SettingsDialog(QDialog):
             return
         self._populate_persona_dropdown()
         self._load_active_persona_into_fields()
+        # Deletion auto-promotes another persona to active -> push it.
+        self._apply_active_persona_to_runtime()
 
     def _import_into(self, target_edit: QTextEdit, label: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
