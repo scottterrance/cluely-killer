@@ -39,16 +39,6 @@ QWidget#OverlayRoot {
     border: 1px solid rgba(248, 113, 113, 90);
 }
 
-#stealthWarning {
-    color: #ffffff;
-    background-color: rgba(220, 38, 38, 220);
-    border: 1px solid rgba(255, 255, 255, 60);
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 12px;
-    font-weight: 700;
-}
-
 #memBadge {
     color: #c8ced9;
     font-size: 9px;
