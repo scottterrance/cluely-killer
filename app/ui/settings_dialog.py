@@ -361,11 +361,17 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.hk_answer = QLineEdit(self.settings.hotkey_answer)
+        self.hk_answer_summary = QLineEdit(self.settings.hotkey_answer_summary)
+        self.hk_answer_simple = QLineEdit(self.settings.hotkey_answer_simple)
+        self.hk_answer_deep = QLineEdit(self.settings.hotkey_answer_deep)
         self.hk_toggle = QLineEdit(self.settings.hotkey_toggle)
         self.hk_clear = QLineEdit(self.settings.hotkey_clear)
         self.hk_settings = QLineEdit(self.settings.hotkey_settings)
         self.hk_quit = QLineEdit(self.settings.hotkey_quit)
-        f.addRow("Answer:", self.hk_answer)
+        f.addRow("Answer (auto-mode):", self.hk_answer)
+        f.addRow("Answer SUMMARY (tie back to last 5 Q+A):", self.hk_answer_summary)
+        f.addRow("Answer SIMPLE (1-2 sentence standalone):", self.hk_answer_simple)
+        f.addRow("Answer DEEP (technical deep-dive):", self.hk_answer_deep)
         f.addRow("Toggle overlay:", self.hk_toggle)
         f.addRow("Clear buffer:", self.hk_clear)
         f.addRow("Open settings:", self.hk_settings)
@@ -373,7 +379,9 @@ class SettingsDialog(QDialog):
         f.addRow(
             QLabel(
                 "<i>pynput syntax — e.g. &lt;ctrl&gt;+&lt;space&gt;, "
-                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a</i>"
+                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a. Plain Ctrl+1/2/3 "
+                "would conflict with browser tab switching, so the mode "
+                "shortcuts use Ctrl+Shift+digit by default.</i>"
             )
         )
         return w
@@ -411,6 +419,9 @@ class SettingsDialog(QDialog):
         s.answer_window_seconds = float(self.window_spin.value())
 
         s.hotkey_answer = self.hk_answer.text().strip()
+        s.hotkey_answer_summary = self.hk_answer_summary.text().strip()
+        s.hotkey_answer_simple = self.hk_answer_simple.text().strip()
+        s.hotkey_answer_deep = self.hk_answer_deep.text().strip()
         s.hotkey_toggle = self.hk_toggle.text().strip()
         s.hotkey_clear = self.hk_clear.text().strip()
         s.hotkey_settings = self.hk_settings.text().strip()

@@ -73,6 +73,9 @@ def main() -> None:
 
     class HotkeyDispatcher(QObject):
         answer_requested = pyqtSignal()
+        answer_summary_requested = pyqtSignal()
+        answer_simple_requested = pyqtSignal()
+        answer_deep_requested = pyqtSignal()
         toggle_requested = pyqtSignal()
         clear_requested = pyqtSignal()
         settings_requested = pyqtSignal()
@@ -127,7 +130,7 @@ def main() -> None:
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
-    from .prompts.builder import ExampleScheduler, build_system_prompt
+    from .prompts.builder import AnswerMode, ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
@@ -139,13 +142,14 @@ def main() -> None:
             base_url=s.deepseek_base_url,
         )
 
-    def _prompt_for(s, include_example: bool) -> str:
+    def _prompt_for(s, include_example: bool, mode: str = AnswerMode.AUTO) -> str:
         return build_system_prompt(
             resume=s.resume_text,
             job_desc=s.job_description,
             about=s.about_me,
             custom=s.custom_system_prompt,
             include_example=include_example,
+            mode=mode,
         )
 
     scheduler = ExampleScheduler()
@@ -209,6 +213,15 @@ def main() -> None:
     dispatcher = HotkeyDispatcher()
     qc = Qt.ConnectionType.QueuedConnection
     dispatcher.answer_requested.connect(controller.trigger_answer, qc)
+    dispatcher.answer_summary_requested.connect(
+        lambda: controller.trigger_answer(mode=AnswerMode.SUMMARY), qc
+    )
+    dispatcher.answer_simple_requested.connect(
+        lambda: controller.trigger_answer(mode=AnswerMode.SIMPLE), qc
+    )
+    dispatcher.answer_deep_requested.connect(
+        lambda: controller.trigger_answer(mode=AnswerMode.DEEP), qc
+    )
     dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
     dispatcher.clear_requested.connect(controller.clear, qc)
     dispatcher.settings_requested.connect(open_settings_dialog, qc)
@@ -217,6 +230,9 @@ def main() -> None:
     def apply_hotkeys() -> None:
         hotkeys.set_hotkeys({
             settings.hotkey_answer: dispatcher.answer_requested.emit,
+            settings.hotkey_answer_summary: dispatcher.answer_summary_requested.emit,
+            settings.hotkey_answer_simple: dispatcher.answer_simple_requested.emit,
+            settings.hotkey_answer_deep: dispatcher.answer_deep_requested.emit,
             settings.hotkey_toggle: dispatcher.toggle_requested.emit,
             settings.hotkey_clear: dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,

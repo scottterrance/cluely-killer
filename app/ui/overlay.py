@@ -199,16 +199,22 @@ class OverlayWindow(QWidget):
         # --- Footer ---
         self.footer = QLabel(self._footer_text())
         self.footer.setObjectName("footer")
+        # Allow the two-line footer to wrap inside the narrow column.
+        self.footer.setWordWrap(True)
+        self.footer.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(self.footer)
 
         self.setStyleSheet(APP_QSS)
 
     def _footer_text(self) -> str:
+        # Two compact lines so the four answer-mode hotkeys all fit in
+        # the narrow 406 px overlay column without wrapping awkwardly.
         return (
-            f"{self.settings.hotkey_answer} answer  \u00b7  "
-            f"{self.settings.hotkey_toggle} hide  \u00b7  "
-            f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
-            f"{self.settings.hotkey_settings} settings"
+            f"{self.settings.hotkey_answer} answer (auto) "
+            f"\u00b7 \u21e7+1 sum \u00b7 \u21e7+2 short \u00b7 \u21e7+3 deep<br>"
+            f"{self.settings.hotkey_toggle} hide "
+            f"\u00b7 {self.settings.hotkey_clear} clear "
+            f"\u00b7 {self.settings.hotkey_settings} settings"
         )
 
     def refresh_footer(self) -> None:

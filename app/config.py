@@ -52,6 +52,16 @@ class Settings:
     hotkey_clear: str = "<ctrl>+r"
     hotkey_settings: str = "<ctrl>+<shift>+s"
     hotkey_quit: str = "<ctrl>+<shift>+q"
+    # Manual answer-mode overrides. Each forces a specific response style
+    # instead of the default smart auto-classifier:
+    #   <ctrl>+<shift>+1 -> SUMMARY: ties back to last 5 Q+A turns
+    #   <ctrl>+<shift>+2 -> SIMPLE:  1-2 sentence standalone, no context
+    #   <ctrl>+<shift>+3 -> DEEP:    technical deep-dive with implementation detail
+    # Plain Ctrl+1/2/3 would conflict with browser tab switching, so we
+    # use Ctrl+Shift+digit which is generally unclaimed by major apps.
+    hotkey_answer_summary: str = "<ctrl>+<shift>+1"
+    hotkey_answer_simple: str = "<ctrl>+<shift>+2"
+    hotkey_answer_deep: str = "<ctrl>+<shift>+3"
 
     # ---- User context (injected into system prompt) ----
     about_me: str = ""

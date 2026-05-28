@@ -15,7 +15,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..audio.buffer import RollingAudioBuffer
 from ..config import Settings
 from ..llm.base import LLMProvider
-from ..prompts.builder import ExampleScheduler
+from ..prompts.builder import AnswerMode, ExampleScheduler
 from ..stt.whisper_engine import WhisperEngine
 from .history import ConversationHistory
 
@@ -84,12 +84,26 @@ class Controller(QObject):
         self._busy = threading.Lock()
 
     # ------------------------------------------------------------------
-    def trigger_answer(self) -> None:
-        """Hotkey entry point. Non-blocking; safe to call from any thread."""
+    def trigger_answer(self, mode: str = AnswerMode.AUTO) -> None:
+        """Hotkey entry point. Non-blocking; safe to call from any thread.
+
+        `mode` selects the response-style block in the system prompt:
+          - AUTO    -> smart classifier (default Ctrl+Space)
+          - SUMMARY -> tie-back to last 5 Q+A   (Ctrl+Shift+1)
+          - SIMPLE  -> 1-2 sentence standalone  (Ctrl+Shift+2)
+          - DEEP    -> technical deep-dive      (Ctrl+Shift+3)
+        """
+        if mode not in AnswerMode.ALL:
+            mode = AnswerMode.AUTO
         if not self._busy.acquire(blocking=False):
             self.status.emit("Busy - wait for current answer to finish")
             return
-        threading.Thread(target=self._do_answer, daemon=True, name="AnswerWorker").start()
+        threading.Thread(
+            target=self._do_answer,
+            args=(mode,),
+            daemon=True,
+            name="AnswerWorker",
+        ).start()
 
     def clear(self) -> None:
         self.audio_buffer.clear()
@@ -98,9 +112,9 @@ class Controller(QObject):
         self.status.emit("Audio buffer + memory cleared")
 
     # ------------------------------------------------------------------
-    def _do_answer(self) -> None:
+    def _do_answer(self, mode: str = AnswerMode.AUTO) -> None:
         try:
-            self.status.emit("Transcribing...")
+            self.status.emit(f"Transcribing... ({mode})" if mode != AnswerMode.AUTO else "Transcribing...")
             audio = self.audio_buffer.get_last_seconds(self.settings.answer_window_seconds)
             if audio.size < self.whisper.samplerate:  # less than 1 second
                 self.error.emit("Not enough audio yet - let the interviewer talk first.")
@@ -111,15 +125,15 @@ class Controller(QObject):
                 self.error.emit("No speech detected in the last window.")
                 return
             self.transcript_ready.emit(transcript)
-            print(f"[answer] transcript: {transcript[:200]!r}", flush=True)
+            print(f"[answer] mode={mode!r} transcript: {transcript[:200]!r}", flush=True)
 
-            self.status.emit("Thinking...")
+            self.status.emit("Thinking..." if mode == AnswerMode.AUTO else f"Thinking... ({mode})")
             include_example = self.scheduler.should_include()
-            system_prompt = self.prompt_builder(self.settings, include_example)
+            system_prompt = self.prompt_builder(self.settings, include_example, mode)
             llm = self.llm_factory(self.settings)
             prior = self.history.as_messages()
             print(
-                f"[answer] provider=deepseek "
+                f"[answer] provider=deepseek mode={mode} "
                 f"history_turns={len(prior)//2}",
                 flush=True,
             )
