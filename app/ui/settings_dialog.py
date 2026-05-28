@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,7 +31,30 @@ from .drop_text_edit import DropZoneTextEdit
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
-        super().__init__(parent)
+        # CRITICAL: pass parent=None to super().__init__, NOT the overlay.
+        #
+        # The overlay has Qt.WindowType.WindowStaysOnTopHint. On Windows,
+        # any child HWND of a topmost window inherits the topmost z-order
+        # at the OS level - regardless of which Qt flags we set on the
+        # child. Just clearing WindowStaysOnTopHint on the dialog isn't
+        # enough; Windows still places it above all non-topmost windows
+        # because its parent is topmost.
+        #
+        # Detaching by passing None makes the dialog a fully independent
+        # top-level window. Browsers, PDF readers, etc. can now cover it
+        # normally when the user clicks them. The `parent` argument is
+        # kept in the signature for API compatibility (callers still pass
+        # `parent=overlay`) but is intentionally ignored.
+        super().__init__(None)
+        # Reset window flags to a clean Dialog window (titlebar + close
+        # button, no inherited Frameless/StayOnTop from the overlay).
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
         self.settings = settings
         self.persona_store = PersonaStore()
         # First-time use: seed Default from whatever's currently in Settings
