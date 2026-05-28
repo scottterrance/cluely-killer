@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,6 +32,15 @@ from .drop_text_edit import DropZoneTextEdit
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
+        # Don't inherit the overlay's WindowStaysOnTopHint - we want the
+        # Settings dialog to behave like a NORMAL window: the user must
+        # be able to Alt+Tab to a browser to copy their API key, switch
+        # to a PDF reader to copy resume text, or just look at another
+        # app while editing context fields. Without this fix, Settings
+        # floats above EVERY application on the system, blocking the
+        # user from doing the very things they opened it to do.
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
+
         self.settings = settings
         self.persona_store = PersonaStore()
         # First-time use: seed Default from whatever's currently in Settings
