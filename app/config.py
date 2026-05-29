@@ -41,13 +41,33 @@ class Settings:
     whisper_device: str = "cpu"
 
     # ---- Audio ----
-    # How many seconds of recent audio to send to whisper on each hotkey press.
+    # Fallback window for the FIRST press in a session, when no
+    # "since-last-press" marker has been set yet. Also kept around as
+    # a sane lower bound during interviews where the interviewer
+    # asks very short questions.
     answer_window_seconds: float = 25.0
-    # Total rolling buffer length kept in memory.
-    buffer_seconds: float = 60.0
+    # Hard ceiling on how much "since-last-press" audio gets sent to
+    # Whisper + the LLM. If the interviewer rambles for longer than
+    # this, only the most recent ``max_capture_seconds`` are used.
+    # 120 s is the default; press the answer key more often to keep
+    # transcripts tight.
+    max_capture_seconds: float = 120.0
+    # Total rolling buffer length kept in memory. Must be >=
+    # ``max_capture_seconds`` or we'd silently drop audio before the
+    # next press could read it. main.py enforces this at startup.
+    buffer_seconds: float = 130.0
 
-    # ---- Hotkeys (pynput GlobalHotKeys syntax) ----
-    hotkey_answer: str = "<ctrl>+<space>"
+    # ---- Hotkeys (pynput-style GlobalHotKeys syntax) ----
+    # Two answer modes:
+    #   - SHORT: answer ONLY about whatever the interviewer said since
+    #     the last press of either answer key. No prior Q+A context
+    #     is sent to the LLM. Use this for self-contained questions.
+    #   - CONTEXT: same fresh transcript, but ALSO sends the last 5
+    #     Q+A pairs from the rolling history as conversation memory.
+    #     Use this for follow-up questions ("can you elaborate on
+    #     that?", "what about the edge case?").
+    hotkey_answer_short: str = "1"
+    hotkey_answer_context: str = "2"
     hotkey_toggle: str = "<ctrl>+\\"
     hotkey_clear: str = "<ctrl>+r"
     hotkey_settings: str = "<ctrl>+<shift>+s"
@@ -90,6 +110,20 @@ def load_settings() -> Settings:
             if s.window_w == 580:
                 s.window_w = 406
                 print("[config] migrated window_w 580 -> 406 (one-time slim-down)")
+            # buffer_seconds must always be >= max_capture_seconds, or
+            # the rolling buffer would evict audio before the next
+            # answer press could read it. Old configs with the prior
+            # default of 60 s get bumped to the new 130 s default
+            # automatically. Anyone who hand-tuned a higher value
+            # keeps their value.
+            if s.buffer_seconds < s.max_capture_seconds + 5:
+                old = s.buffer_seconds
+                s.buffer_seconds = s.max_capture_seconds + 10
+                print(
+                    f"[config] migrated buffer_seconds {old} -> "
+                    f"{s.buffer_seconds} (must exceed max_capture_seconds "
+                    f"{s.max_capture_seconds})"
+                )
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")
