@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,7 +31,30 @@ from .drop_text_edit import DropZoneTextEdit
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
-        super().__init__(parent)
+        # CRITICAL: pass parent=None to super().__init__, NOT the overlay.
+        #
+        # The overlay has Qt.WindowType.WindowStaysOnTopHint. On Windows,
+        # any child HWND of a topmost window inherits the topmost z-order
+        # at the OS level - regardless of which Qt flags we set on the
+        # child. Just clearing WindowStaysOnTopHint on the dialog isn't
+        # enough; Windows still places it above all non-topmost windows
+        # because its parent is topmost.
+        #
+        # Detaching by passing None makes the dialog a fully independent
+        # top-level window. Browsers, PDF readers, etc. can now cover it
+        # normally when the user clicks them. The `parent` argument is
+        # kept in the signature for API compatibility (callers still pass
+        # `parent=overlay`) but is intentionally ignored.
+        super().__init__(None)
+        # Reset window flags to a clean Dialog window (titlebar + close
+        # button, no inherited Frameless/StayOnTop from the overlay).
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
         self.settings = settings
         self.persona_store = PersonaStore()
         # First-time use: seed Default from whatever's currently in Settings
@@ -345,35 +369,55 @@ class SettingsDialog(QDialog):
         # attempt that fails because we're locked offline.
         self.whisper_model_label = QLabel(f"<code>{self.settings.whisper_model}</code> (bundled, offline-only)")
 
+        # First-press fallback window. Only used on the very first
+        # answer of a session, before the since-last-press marker has
+        # been set. After that, every press uses the marker-based
+        # capture (capped at "Max capture" below).
         self.window_spin = QDoubleSpinBox()
         self.window_spin.setRange(5.0, 60.0)
         self.window_spin.setSingleStep(1.0)
         self.window_spin.setValue(self.settings.answer_window_seconds)
 
+        # Hard ceiling on since-last-press audio. If the interviewer
+        # rambles past this, only the most-recent N seconds get sent
+        # to Whisper / the LLM.
+        self.max_capture_spin = QDoubleSpinBox()
+        self.max_capture_spin.setRange(15.0, 600.0)
+        self.max_capture_spin.setSingleStep(5.0)
+        self.max_capture_spin.setValue(self.settings.max_capture_seconds)
+
         f.addRow("Whisper model:", self.whisper_model_label)
-        f.addRow("Audio window (sec):", self.window_spin)
+        f.addRow("First-press window (sec):", self.window_spin)
+        f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(QLabel(
-            "<i>Whisper is bundled offline. No downloads, ever.</i>"
+            "<i>Each press of '1' or '2' transcribes everything the "
+            "interviewer said since the previous press, capped at "
+            "<b>Max capture</b>. Press more often = tighter transcripts.</i>"
         ))
         return w
 
     def _hotkeys_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
-        self.hk_answer = QLineEdit(self.settings.hotkey_answer)
+        self.hk_answer_short = QLineEdit(self.settings.hotkey_answer_short)
+        self.hk_answer_context = QLineEdit(self.settings.hotkey_answer_context)
         self.hk_toggle = QLineEdit(self.settings.hotkey_toggle)
         self.hk_clear = QLineEdit(self.settings.hotkey_clear)
         self.hk_settings = QLineEdit(self.settings.hotkey_settings)
         self.hk_quit = QLineEdit(self.settings.hotkey_quit)
-        f.addRow("Answer:", self.hk_answer)
+        f.addRow("Answer (no context):", self.hk_answer_short)
+        f.addRow("Answer (last 5 Q+A as context):", self.hk_answer_context)
         f.addRow("Toggle overlay:", self.hk_toggle)
         f.addRow("Clear buffer:", self.hk_clear)
         f.addRow("Open settings:", self.hk_settings)
         f.addRow("Quit app:", self.hk_quit)
         f.addRow(
             QLabel(
-                "<i>pynput syntax — e.g. &lt;ctrl&gt;+&lt;space&gt;, "
-                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a</i>"
+                "<i>pynput syntax - e.g. <b>1</b>, <b>2</b>, &lt;ctrl&gt;+&lt;space&gt;, "
+                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a.<br>"
+                "Bare digits like <b>1</b> / <b>2</b> are <i>global</i>: while the app "
+                "is running they will be intercepted everywhere on the OS, so don't "
+                "set them to keys you also need for typing.</i>"
             )
         )
         return w
@@ -409,8 +453,15 @@ class SettingsDialog(QDialog):
         # Whisper model is hard-pinned to 'small' (bundled). Don't let
         # anyone overwrite it from the UI.
         s.answer_window_seconds = float(self.window_spin.value())
+        s.max_capture_seconds = float(self.max_capture_spin.value())
+        # buffer_seconds must always exceed max_capture_seconds. Bump
+        # it here so the Audio tab can't get persisted into a state
+        # where the next app start would silently drop audio.
+        if s.buffer_seconds < s.max_capture_seconds + 5:
+            s.buffer_seconds = s.max_capture_seconds + 10
 
-        s.hotkey_answer = self.hk_answer.text().strip()
+        s.hotkey_answer_short = self.hk_answer_short.text().strip() or "1"
+        s.hotkey_answer_context = self.hk_answer_context.text().strip() or "2"
         s.hotkey_toggle = self.hk_toggle.text().strip()
         s.hotkey_clear = self.hk_clear.text().strip()
         s.hotkey_settings = self.hk_settings.text().strip()

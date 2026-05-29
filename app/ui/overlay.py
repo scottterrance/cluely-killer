@@ -183,7 +183,10 @@ class OverlayWindow(QWidget):
         v.addLayout(header)
 
         # --- Question / transcript ---
-        self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
+        self.question_label = QLabel(
+            "Press '1' for a quick answer to the last thing said, "
+            "or '2' to also use the last 5 Q+A as context."
+        )
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
         self.question_label.setMaximumHeight(60)
@@ -205,7 +208,8 @@ class OverlayWindow(QWidget):
 
     def _footer_text(self) -> str:
         return (
-            f"{self.settings.hotkey_answer} answer  \u00b7  "
+            f"{self.settings.hotkey_answer_short} answer-only  \u00b7  "
+            f"{self.settings.hotkey_answer_context} answer+context  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
             f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
             f"{self.settings.hotkey_settings} settings"

@@ -3,12 +3,27 @@
 The Controller lives on the main thread but offloads the heavy work
 (STT + LLM) to a worker thread so the UI never freezes. UI updates
 are delivered via Qt signals, which are queued safely across threads.
+
+Two answer modes
+----------------
+``trigger_answer(mode)`` accepts:
+
+  * ``"short"``   - send Whisper-transcribed text to the LLM with NO
+    prior conversation context. Quick, self-contained answers.
+  * ``"context"`` - send the same transcript along with the last 5
+    Q+A pairs from ``ConversationHistory``. Use for follow-up
+    questions ("elaborate on that", "what about edge cases?").
+
+In both modes the audio that gets transcribed is "everything captured
+since the last successful answer (in either mode), capped at
+``settings.max_capture_seconds``". This is the position-marker
+behavior implemented in :class:`RollingAudioBuffer`.
 """
 from __future__ import annotations
 
 import threading
 import traceback
-from typing import Callable
+from typing import Callable, Literal
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -18,6 +33,9 @@ from ..llm.base import LLMProvider
 from ..prompts.builder import ExampleScheduler
 from ..stt.whisper_engine import WhisperEngine
 from .history import ConversationHistory
+
+
+AnswerMode = Literal["short", "context"]
 
 
 def _friendly_error(exc: BaseException) -> str:
@@ -82,45 +100,96 @@ class Controller(QObject):
         self.prompt_builder = prompt_builder
         self.history = history
         self._busy = threading.Lock()
+        # Sample-position marker: "last sample we already consumed in a
+        # successful answer". Initialized to -1 so the very first press
+        # falls back to ``answer_window_seconds`` instead of trying to
+        # transcribe the entire current buffer (which on app start is
+        # mostly silence anyway).
+        self._last_marker: int = -1
 
     # ------------------------------------------------------------------
-    def trigger_answer(self) -> None:
-        """Hotkey entry point. Non-blocking; safe to call from any thread."""
+    def trigger_answer(self, mode: AnswerMode = "short") -> None:
+        """Hotkey entry point. Non-blocking; safe to call from any thread.
+
+        ``mode``:
+          - ``"short"``   - no prior Q+A context attached to the LLM call.
+          - ``"context"`` - last 5 Q+A pairs attached as chat memory.
+        """
+        if mode not in ("short", "context"):
+            mode = "short"
         if not self._busy.acquire(blocking=False):
             self.status.emit("Busy - wait for current answer to finish")
             return
-        threading.Thread(target=self._do_answer, daemon=True, name="AnswerWorker").start()
+        threading.Thread(
+            target=self._do_answer,
+            args=(mode,),
+            daemon=True,
+            name=f"AnswerWorker-{mode}",
+        ).start()
 
     def clear(self) -> None:
         self.audio_buffer.clear()
         self.history.clear()
+        # Reset to "next press starts a fresh capture window" by
+        # snapping the marker to the buffer's current position. This
+        # ensures the first press AFTER a clear sees only audio that
+        # arrived after the clear, never any pre-clear leftovers from
+        # before _total_appended advanced past the wipe point.
+        self._last_marker = self.audio_buffer.current_position()
         self.history_changed.emit(0)
         self.status.emit("Audio buffer + memory cleared")
 
     # ------------------------------------------------------------------
-    def _do_answer(self) -> None:
+    def _grab_audio(self):
+        """Return (audio_np, source_label) per the marker rules."""
+        if self._last_marker < 0:
+            # First press of the session: no marker yet. Fall back to
+            # the "classic" last-N-seconds slice so users don't have to
+            # press once just to "arm" the marker.
+            audio = self.audio_buffer.get_last_seconds(
+                self.settings.answer_window_seconds
+            )
+            return audio, f"last {self.settings.answer_window_seconds:.0f}s (first press)"
+        audio = self.audio_buffer.get_since_position(
+            self._last_marker, self.settings.max_capture_seconds
+        )
+        return audio, "since-last-press"
+
+    def _do_answer(self, mode: AnswerMode) -> None:
         try:
             self.status.emit("Transcribing...")
-            audio = self.audio_buffer.get_last_seconds(self.settings.answer_window_seconds)
+            audio, source_label = self._grab_audio()
             if audio.size < self.whisper.samplerate:  # less than 1 second
-                self.error.emit("Not enough audio yet - let the interviewer talk first.")
+                self.error.emit(
+                    "Not enough new audio yet - let the interviewer talk first."
+                )
                 return
 
+            captured_seconds = audio.size / self.whisper.samplerate
             transcript = self.whisper.transcribe(audio)
             if not transcript:
-                self.error.emit("No speech detected in the last window.")
+                self.error.emit("No speech detected in the captured window.")
                 return
             self.transcript_ready.emit(transcript)
-            print(f"[answer] transcript: {transcript[:200]!r}", flush=True)
+            print(
+                f"[answer] mode={mode} source={source_label} "
+                f"audio={captured_seconds:.1f}s transcript={transcript[:200]!r}",
+                flush=True,
+            )
 
-            self.status.emit("Thinking...")
+            self.status.emit(
+                f"Thinking ({mode}, {captured_seconds:.0f}s)..."
+            )
             include_example = self.scheduler.should_include()
             system_prompt = self.prompt_builder(self.settings, include_example)
             llm = self.llm_factory(self.settings)
-            prior = self.history.as_messages()
+            # The mode picks whether prior turns are shipped to the LLM.
+            # ``short``  -> isolated answer, no follow-up gravity.
+            # ``context`` -> last 5 Q+A pairs as chat history.
+            prior = self.history.as_messages() if mode == "context" else []
             print(
-                f"[answer] provider=deepseek "
-                f"history_turns={len(prior)//2}",
+                f"[answer] provider=deepseek mode={mode} "
+                f"history_turns_sent={len(prior)//2}",
                 flush=True,
             )
 
@@ -128,7 +197,9 @@ class Controller(QObject):
             chunks: list[str] = []
             err_msg: str | None = None
             try:
-                for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
+                for chunk in llm.stream_chat(
+                    system_prompt, transcript, prior_messages=prior
+                ):
                     chunks.append(chunk)
                     self.answer_chunk.emit(chunk)
             except Exception as e:
@@ -142,9 +213,9 @@ class Controller(QObject):
                 flush=True,
             )
 
-            # Decide what to surface. Critical: never leave the answer panel
-            # silently empty - the candidate has no idea what happened
-            # otherwise.
+            # Decide what to surface. Critical: never leave the answer
+            # panel silently empty - the candidate has no idea what
+            # happened otherwise.
             fallback: str | None = None
             if err_msg:
                 fallback = f"\u26a0  {err_msg}"
@@ -157,20 +228,29 @@ class Controller(QObject):
             elif full.upper() == "SKIP":
                 fallback = (
                     "\u26a0  The model output 'SKIP' - it judged the transcribed text as not a "
-                    "clear question. Press Ctrl+R to clear, then Ctrl+Space again right after "
-                    "the interviewer finishes speaking."
+                    "clear question. Press '1' or '2' again right after the interviewer "
+                    "finishes asking, or press Ctrl+R to reset."
                 )
 
             if fallback:
-                # If chunks already arrived, append the warning. If the panel
-                # is empty, the warning IS the visible content.
                 separator = "\n\n" if chunks else ""
                 self.answer_chunk.emit(separator + fallback)
 
             self.answer_finished.emit()
 
-            # Only real answers go in memory.
-            if not err_msg and full and full.upper() != "SKIP":
+            success = not err_msg and full and full.upper() != "SKIP"
+            if success:
+                # Advance the marker BEFORE writing to history. From the
+                # interviewer's clock perspective, "this question is
+                # done" the moment our transcribe call finished; any
+                # audio still arriving after this is the START of the
+                # next question.
+                self._last_marker = self.audio_buffer.current_position()
+                # Both modes feed history. The difference between
+                # modes is whether we *read* history on the way in,
+                # not whether we write to it on the way out - the
+                # background memory must keep growing so future
+                # ``context`` presses can rely on it.
                 self.history.add(transcript, full)
                 self.history_changed.emit(len(self.history))
                 self.status.emit("Ready")

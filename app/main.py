@@ -72,7 +72,8 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     class HotkeyDispatcher(QObject):
-        answer_requested = pyqtSignal()
+        answer_short_requested = pyqtSignal()
+        answer_context_requested = pyqtSignal()
         toggle_requested = pyqtSignal()
         clear_requested = pyqtSignal()
         settings_requested = pyqtSignal()
@@ -100,7 +101,18 @@ def main() -> None:
     from .audio.buffer import RollingAudioBuffer
     from .audio.loopback import LoopbackCapture
 
-    buffer = RollingAudioBuffer(samplerate=16000, max_seconds=settings.buffer_seconds)
+    buffer = RollingAudioBuffer(
+        samplerate=16000,
+        # The rolling buffer must be at least max_capture_seconds long,
+        # otherwise audio that arrives between two answer presses could
+        # be evicted before the next press reads it. config.py already
+        # migrates persisted values, but enforce it here too as a
+        # belt-and-braces guard for in-memory edits.
+        max_seconds=max(
+            settings.buffer_seconds,
+            settings.max_capture_seconds + 5,
+        ),
+    )
     capture = LoopbackCapture(buffer, samplerate=16000)
     capture.start()
     _say("audio capture started.")
@@ -208,7 +220,15 @@ def main() -> None:
     # ---- Hotkeys (with cross-thread marshalling) ----
     dispatcher = HotkeyDispatcher()
     qc = Qt.ConnectionType.QueuedConnection
-    dispatcher.answer_requested.connect(controller.trigger_answer, qc)
+    # Two answer keys: short = no history, context = last 5 Q+A as memory.
+    # The lambdas wrap controller.trigger_answer so it can be invoked with
+    # the right mode argument from the queued-connection slot.
+    dispatcher.answer_short_requested.connect(
+        lambda: controller.trigger_answer("short"), qc
+    )
+    dispatcher.answer_context_requested.connect(
+        lambda: controller.trigger_answer("context"), qc
+    )
     dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
     dispatcher.clear_requested.connect(controller.clear, qc)
     dispatcher.settings_requested.connect(open_settings_dialog, qc)
@@ -216,7 +236,8 @@ def main() -> None:
 
     def apply_hotkeys() -> None:
         hotkeys.set_hotkeys({
-            settings.hotkey_answer: dispatcher.answer_requested.emit,
+            settings.hotkey_answer_short: dispatcher.answer_short_requested.emit,
+            settings.hotkey_answer_context: dispatcher.answer_context_requested.emit,
             settings.hotkey_toggle: dispatcher.toggle_requested.emit,
             settings.hotkey_clear: dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,
