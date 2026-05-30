@@ -21,6 +21,7 @@ mirroring the local engine's resume/JD keyword biasing.
 from __future__ import annotations
 
 import io
+import time
 import wave
 
 import httpx
@@ -30,6 +31,54 @@ from .base import STTEngine
 
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_MODEL = "whisper-large-v3-turbo"
+
+# Cap the audio we upload. The Groq dashboard showed every call sending a
+# fixed 30s blob, which bloats the upload and exposes the request to the
+# free-tier STT queue (latency spiked to 6-13s). One interview question
+# almost never exceeds ~15s of actual speech, so we trim silence and cap
+# to this. Smaller payload = faster upload + less compute + less queue
+# exposure.
+MAX_UPLOAD_SECONDS = 15.0
+
+
+def _trim_silence(audio: np.ndarray, samplerate: int, max_seconds: float) -> np.ndarray:
+    """Trim leading/trailing silence and cap to the most-recent
+    ``max_seconds`` of SPEECH.
+
+    Why: a press often captures dead air before the question and a beat
+    of silence after, plus (on the escape-hatch path) a wide window that
+    may include the tail of a previous question. We keep only the
+    contiguous spoken region, which is what matters and what makes the
+    upload small.
+
+    Conservative: frame-based RMS gate with generous padding. If we
+    can't find a clear speech region we fall back to "the last
+    max_seconds of audio" rather than risk cutting the question.
+    """
+    if audio.size == 0:
+        return audio
+    cap = int(max(1.0, max_seconds) * samplerate)
+    frame = max(1, int(0.05 * samplerate))  # 50 ms frames
+    n_frames = audio.size // frame
+    if n_frames < 2:
+        return audio[-cap:]
+    trimmed_len = n_frames * frame
+    frames = audio[:trimmed_len].reshape(n_frames, frame)
+    rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+    # Adaptive threshold: above the noise floor but below speech level.
+    peak = float(rms.max()) if rms.size else 0.0
+    if peak <= 0:
+        return audio[-cap:]
+    thresh = max(peak * 0.18, 0.004)
+    voiced = np.where(rms > thresh)[0]
+    if voiced.size == 0:
+        return audio[-cap:]
+    pad = int(0.2 * samplerate)  # 200 ms padding each side
+    start = max(0, voiced[0] * frame - pad)
+    end = min(audio.size, (voiced[-1] + 1) * frame + pad)
+    speech = audio[start:end]
+    # Keep only the most-recent cap seconds of the speech region.
+    return speech[-cap:] if speech.size > cap else speech
 
 
 def _float32_to_wav_bytes(audio: np.ndarray, samplerate: int) -> bytes:
@@ -84,6 +133,12 @@ class GroqSTTEngine(STTEngine):
         if audio is None or audio.size < self.samplerate * 0.5:
             return ""
         audio = audio.astype(np.float32, copy=False)
+        # Trim silence + cap the upload. The dashboard showed fixed 30s
+        # uploads causing 6-13s queue latency; sending only the spoken
+        # region (<=15s) shrinks the payload dramatically.
+        raw_secs = audio.size / self.samplerate
+        audio = _trim_silence(audio, self.samplerate, MAX_UPLOAD_SECONDS)
+        sent_secs = audio.size / self.samplerate
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak == 0.0:
             return ""
@@ -104,6 +159,7 @@ class GroqSTTEngine(STTEngine):
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
+        t0 = time.monotonic()
         try:
             resp = httpx.post(
                 f"{self.base_url}/audio/transcriptions",
@@ -121,6 +177,15 @@ class GroqSTTEngine(STTEngine):
             raise RuntimeError(
                 f"Groq STT HTTP {resp.status_code}: {resp.text[:300]}"
             )
+        elapsed = time.monotonic() - t0
+        # Wall-clock receipt so latency is visible (the dashboard showed
+        # STT, not the LLM, was the bottleneck).
+        print(
+            f"[groq-stt] uploaded {sent_secs:.1f}s audio "
+            f"(trimmed from {raw_secs:.1f}s, {len(wav_bytes)//1024} KB) -> "
+            f"{elapsed:.2f}s round-trip",
+            flush=True,
+        )
         try:
             return (resp.json().get("text") or "").strip()
         except Exception as e:
