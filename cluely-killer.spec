@@ -6,16 +6,30 @@
 # Output: dist/cluely-killer/cluely-killer.exe  (one-folder bundle).
 # To distribute, zip the entire dist/cluely-killer/ folder.
 #
-# THIS BUILD BUNDLES THE WHISPER 'large-v3-turbo' MODEL (local STT).
-# Before running build.bat, stage the model with `setup-model.ps1` once
-# (it downloads large-v3-turbo into ./models/whisper-large-v3-turbo/).
-# build.bat then copies ./models/ next to the .exe so the end user's
-# machine never downloads anything. Transcription is fully local/offline;
-# only the DeepSeek answer call needs the network. Final dist size ~2 GB
-# (the model alone is ~1.5 GB at int8).
+# THIS BUILD BUNDLES THE WHISPER MODEL(S) (local STT) + the NVIDIA
+# CUDA/cuDNN runtime DLLs (for GPU acceleration on machines that have an
+# NVIDIA GPU).
+#
+# Before running build.bat:
+#   1. Stage one or more models with setup-model.ps1, e.g.:
+#        .\setup-model.ps1 -Model large-v3-turbo
+#        .\setup-model.ps1 -Model small
+#      Each lands in .\models\whisper-<name>\ and build.bat copies the
+#      whole .\models\ folder next to the .exe.
+#   2. (For GPU support) install the CUDA DLLs into the build venv:
+#        pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+#      These are just files - they bundle fine even on an Intel-only
+#      build machine; they only need a real NVIDIA GPU at RUNTIME.
+#
+# Transcription is fully local/offline; only the DeepSeek answer call
+# needs the network. Dist size depends on which models you stage
+# (~1.5 GB per large-v3-turbo, ~0.5 GB per small) plus ~0.5 GB of CUDA
+# DLLs if bundled.
 
 # ruff: noqa
+import glob
 import os
+import site
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
@@ -27,6 +41,60 @@ soundcard_data   = collect_data_files("soundcard")
 fwhisper_hidden  = collect_submodules("faster_whisper")
 ct2_hidden       = collect_submodules("ctranslate2")
 soundcard_hidden = collect_submodules("soundcard")
+
+
+def _collect_nvidia_dlls():
+    """Bundle the NVIDIA CUDA/cuDNN runtime DLLs from the pip
+    'nvidia-*-cu12' packages so GPU transcription works on the end-user's
+    machine WITHOUT them installing a separate CUDA toolkit.
+
+    KEY POINT: these are just DLL files. They install + bundle fine even
+    on a build machine with NO NVIDIA GPU (e.g. an Intel-only laptop).
+    They only need a real NVIDIA GPU at RUNTIME, on the user's machine.
+
+    Best-effort: returns [] if the packages aren't installed, which yields
+    a CPU-only build (still works; just no GPU acceleration). Install them
+    on the build machine with:
+        pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+
+    DLLs are placed at the bundle ROOT (dest ".") so CTranslate2's loader
+    finds them on the Windows DLL search path.
+    """
+    roots = set()
+    try:
+        import nvidia
+        for p in list(getattr(nvidia, "__path__", [])):
+            roots.add(p)
+    except Exception:
+        pass
+    candidates = []
+    try:
+        candidates.extend(site.getsitepackages())
+    except Exception:
+        pass
+    try:
+        candidates.append(site.getusersitepackages())
+    except Exception:
+        pass
+    for sp in candidates:
+        cand = os.path.join(sp, "nvidia")
+        if os.path.isdir(cand):
+            roots.add(cand)
+
+    pairs = []
+    seen = set()
+    for root in roots:
+        for dll in glob.glob(os.path.join(root, "**", "*.dll"), recursive=True):
+            name = os.path.basename(dll).lower()
+            if name in seen:
+                continue
+            seen.add(name)
+            pairs.append((dll, "."))
+    print(f"[spec] bundling {len(pairs)} NVIDIA CUDA/cuDNN DLL(s) for GPU support")
+    return pairs
+
+
+nvidia_binaries = _collect_nvidia_dlls()
 
 # Lazy-imported inside app/utils/extract.py - PyInstaller won't see them.
 lazy_hidden = [
@@ -49,7 +117,10 @@ excludes = [
 a = Analysis(
     ["run.py"],
     pathex=["."],
-    binaries=[],
+    binaries=[
+        # NVIDIA CUDA/cuDNN runtime DLLs (empty list -> CPU-only build).
+        *nvidia_binaries,
+    ],
     datas=[
         *fwhisper_data,
         *ct2_data,
