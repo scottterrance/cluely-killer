@@ -182,6 +182,12 @@ def main() -> None:
     from .stt.biasing import build_vocab_from_context
 
     def _refresh_whisper_bias() -> None:
+        if not settings.stt_bias_enabled:
+            whisper.set_bias([])
+            if transcriber is not None:
+                transcriber.set_bias([])
+            _say("STT keyword biasing DISABLED (stt_bias_enabled=False).")
+            return
         vocab = build_vocab_from_context(
             about=settings.about_me,
             resume=settings.resume_text,

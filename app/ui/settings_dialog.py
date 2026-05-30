@@ -428,17 +428,26 @@ class SettingsDialog(QDialog):
         )
         self.continuous_check.setChecked(self.settings.continuous_stt)
 
+        # Keyword biasing toggle. Helps recognize names/jargon but can
+        # leak the glossary into transcripts on quiet audio.
+        self.bias_check = QCheckBox(
+            "Bias transcription toward my resume/JD keywords"
+        )
+        self.bias_check.setChecked(self.settings.stt_bias_enabled)
+
         f.addRow("Local Whisper model:", self.whisper_model_label)
         f.addRow("First-press window (sec):", self.window_spin)
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(self.continuous_check)
+        f.addRow(self.bias_check)
         f.addRow(QLabel(
             "<i><b>Continuous transcription</b> runs the <b>local</b> Whisper "
             "model in the background as the interviewer talks, so pressing "
             "'1'/'2' only waits for the AI answer - not for transcription. "
             "It uses your CPU but <b>no extra cloud quota</b>, and needs the "
-            "local model present. Turn it off to transcribe only on press "
-            "using the STT backend chosen on the AI Provider tab.<br><br>"
+            "local model present. <b>If your CPU is slow, turn this OFF and set "
+            "Transcription = Cloud turbo on the AI Provider tab</b> for the "
+            "fastest, most accurate results.<br><br>"
             "Each press of '1' or '2' covers everything the interviewer said "
             "since the previous press, capped at <b>Max capture</b>.</i>"
         ))
@@ -514,6 +523,7 @@ class SettingsDialog(QDialog):
         s.answer_window_seconds = float(self.window_spin.value())
         s.max_capture_seconds = float(self.max_capture_spin.value())
         s.continuous_stt = self.continuous_check.isChecked()
+        s.stt_bias_enabled = self.bias_check.isChecked()
         # buffer_seconds must always exceed max_capture_seconds. Bump
         # it here so the Audio tab can't get persisted into a state
         # where the next app start would silently drop audio.

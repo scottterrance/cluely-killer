@@ -174,10 +174,76 @@ def build_initial_prompt(keywords: list[str]) -> str | None:
 
     Kept SHORT on purpose: a long initial_prompt is a well-known trigger
     for Whisper's repetition/hallucination loops (the 'NET STOP CA USA'
-    garbage). We cap to the first ~18 terms and ~240 chars.
+    garbage). We cap to the first ~12 terms and ~180 chars. We do NOT
+    prefix a label like 'Glossary:' - Whisper tends to echo a labelled
+    prompt back verbatim into the transcript on quiet/short audio.
     """
     if not keywords:
         return None
-    glossary = ", ".join(keywords[:18])
-    prompt = f"Glossary: {glossary}."
-    return prompt[:240]
+    # No leading label, just the terms as a plausible spoken context.
+    prompt = ", ".join(keywords[:12]) + "."
+    return prompt[:180]
+
+
+def strip_prompt_echo(text: str, keywords: list[str]) -> str:
+    """Remove a leaked biasing-prompt echo from a transcript.
+
+    Whisper (local AND Groq cloud) will sometimes regurgitate the
+    ``initial_prompt`` / ``prompt`` glossary as if it were spoken, esp.
+    on short, quiet, or garbled audio - producing junk like
+    'Glossary, SIA, NJ, UI, UX. Okay, so why did you...'.
+
+    Strategy (deliberately conservative - we only ever trim a LEADING
+    junk run, and only up to a sentence boundary):
+      * Consider only the FIRST sentence (text up to the first . ? !).
+      * Split it into words. If EVERY word in that first sentence is
+        glossary 'noise' (a known glossary term, or a short <=5-char
+        ALL-CAPS/acronym/number token, or a bare 'Glossary' label),
+        drop the whole first sentence and return the remainder.
+      * Otherwise leave the text untouched. A real question always
+        contains ordinary lowercase words, so it can never be wholly
+        classified as noise -> clean transcripts pass through verbatim.
+    """
+    if not text:
+        return text
+    s = text.strip()
+
+    # Build the noise vocabulary (lowercased), including span parts.
+    vocab = {"glossary"}
+    for kw in keywords or []:
+        for part in kw.split():
+            p = part.lower().strip(".,:;")
+            if p:
+                vocab.add(p)
+
+    import re as _re
+
+    def _is_noise_word(w: str) -> bool:
+        bare = w.strip(".,:;!?").strip()
+        if not bare:
+            return True  # pure punctuation between tokens
+        low = bare.lower()
+        if low in vocab:
+            return True
+        # Short ALL-CAPS / acronym / alphanumeric token (SIA, NJ, UX, S3).
+        if 1 <= len(bare) <= 5 and not bare.islower() and bare not in ("I",):
+            # Must not be a normal Capitalized word like 'Okay'/'Tell':
+            # those contain lowercase letters. Pure-caps or mixed short
+            # codes qualify; 'Okay' (has lowercase) does NOT.
+            if not any(c.islower() for c in bare):
+                return True
+        return False
+
+    # Find the first sentence boundary.
+    m = _re.search(r"[.?!]", s)
+    if not m:
+        return s  # no sentence break; don't risk trimming a real question
+    first = s[: m.end()]          # includes the punctuation
+    rest = s[m.end():].lstrip()
+
+    words = [w for w in _re.split(r"\s+", first) if w]
+    if not words:
+        return s
+    if all(_is_noise_word(w) for w in words) and rest:
+        return rest
+    return s

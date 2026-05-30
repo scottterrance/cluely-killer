@@ -104,6 +104,12 @@ class Settings:
     # (whatever stt_backend is selected). Auto-disabled at runtime if
     # the local model isn't available.
     continuous_stt: bool = True
+    # Feed a glossary of the candidate's resume/JD terms to Whisper to
+    # bias proper-noun/jargon recognition. Helpful in theory, but on
+    # short/quiet audio Whisper can ECHO the glossary into the transcript
+    # ('Glossary, SIA, NJ, UI...'). We sanitize that echo, but if you'd
+    # rather avoid the risk entirely set this False.
+    stt_bias_enabled: bool = True
 
     # ---- Hotkeys (pynput-style GlobalHotKeys syntax) ----
     # Two answer modes:

@@ -127,6 +127,10 @@ class Controller(QObject):
         # transcript segment already consumed". -1 means "first press,
         # take everything currently buffered".
         self._last_seq: int = -1
+        # Count of consecutive presses where the local background STT was
+        # lagging (backlog > threshold). Used to nudge the user toward
+        # cloud STT after a few hits.
+        self._slow_stt_hits: int = 0
 
     def _continuous_active(self) -> bool:
         return bool(self.transcriber) and bool(self.settings.continuous_stt)
@@ -225,15 +229,20 @@ class Controller(QObject):
         (common on slower CPUs with large-v3-turbo), the accumulated
         segments are STALE - reading them would answer a question from
         many seconds ago. When the backlog exceeds a small threshold we
-        bypass the queue and transcribe the most-recent window directly
-        on this thread, so the answer reflects what was JUST said.
+        bypass the queue and transcribe a TIGHT most-recent window
+        directly, so the answer reflects the question JUST asked rather
+        than a blend of the last several.
         """
         t = self.transcriber
         backlog = t.backlog_seconds()
         # Threshold: a couple of poll cycles + one chunk. Above this the
         # queue is meaningfully behind the present.
         if backlog > 6.0:
-            cap = min(self.settings.max_capture_seconds, 30.0)
+            self._slow_stt_hits += 1
+            # Tight window: one question is rarely more than ~18s. Using
+            # the full max_capture here would blend 2-3 questions into
+            # one stale transcript (the bug seen in the field logs).
+            cap = min(self.settings.max_capture_seconds, 18.0)
             # Prefer a FAST engine for this synchronous press-time call.
             # If a Groq key is configured, Groq cloud STT (216x realtime)
             # turns this into a sub-second call instead of blocking on the
@@ -246,12 +255,20 @@ class Controller(QObject):
             except Exception:
                 fast = None
             text = t.transcribe_recent(cap, engine=fast)
+            text = self._clean_transcript(text)
             latest_seq = t.current_seq()
 
             def commit():
                 self._last_seq = latest_seq
 
             via = "cloud" if fast is not None else "local"
+            # If the local background loop keeps falling behind, nudge the
+            # user to switch STT to cloud (one-time-ish hint).
+            if self._slow_stt_hits == 3 and self.settings.groq_api_key:
+                self.status.emit(
+                    "Local STT keeps lagging - consider Settings -> AI "
+                    "Provider -> Transcription = Cloud turbo for instant STT."
+                )
             label = f"continuous RECENT via {via} (backlog was {backlog:.0f}s)"
             return text, label, commit
 
@@ -266,12 +283,35 @@ class Controller(QObject):
         text, latest_seq, covered = t.snapshot_since(
             0 if since < 0 else since, self.settings.max_capture_seconds
         )
+        text = self._clean_transcript(text)
 
         def commit():
             self._last_seq = latest_seq
 
         label = f"continuous since seq {since} ({covered:.1f}s)"
         return text, label, commit
+
+    def _clean_transcript(self, text: str) -> str:
+        """Strip any leaked Whisper biasing-prompt echo from a transcript.
+
+        Whisper sometimes parrots the glossary prompt as if spoken
+        ('Glossary, SIA, NJ, UI...'). We remove that leading junk so the
+        LLM sees only the real question.
+        """
+        if not text:
+            return text
+        try:
+            from ..stt.biasing import build_vocab_from_context, strip_prompt_echo
+
+            vocab = build_vocab_from_context(
+                about=self.settings.about_me,
+                resume=self.settings.resume_text,
+                job_desc=self.settings.job_description,
+                custom=self.settings.custom_system_prompt,
+            )
+            return strip_prompt_echo(text, vocab)
+        except Exception:
+            return text
 
     def _do_answer(self, mode: AnswerMode) -> None:
         try:
@@ -303,6 +343,7 @@ class Controller(QObject):
                     return
                 captured_seconds = audio.size / self.whisper.samplerate
                 transcript = self.whisper.transcribe(audio)
+                transcript = self._clean_transcript(transcript)
                 if not transcript:
                     self.error.emit("No speech detected in the captured window.")
                     return
