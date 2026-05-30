@@ -103,6 +103,15 @@ class Settings:
     # ('Glossary, SIA, NJ, UI...'). We sanitize that echo, but if you'd
     # rather avoid the risk entirely set this False.
     stt_bias_enabled: bool = True
+    # Speculative pre-generation: when the interviewer PAUSES (a likely
+    # end-of-question), start generating the SHORT-mode DeepSeek answer
+    # in the background BEFORE you press. If you then press '1', the
+    # answer is already (partly) streamed, so it appears instantly -
+    # hiding DeepSeek's generation time behind the natural pause. Costs a
+    # few extra tokens on guesses you don't use. Only affects mode '1'
+    # (short); mode '2' (context) always generates fresh. Requires
+    # continuous_stt. Default on.
+    speculative_enabled: bool = True
 
     # ---- Hotkeys (pynput-style GlobalHotKeys syntax) ----
     # Two answer modes:

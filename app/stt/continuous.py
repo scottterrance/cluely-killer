@@ -81,6 +81,15 @@ class ContinuousTranscriber:
         self._force_flush = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_error: str | None = None
+        # Optional callback fired AFTER a new segment is finalized BY A
+        # NATURAL PAUSE (the speaker stopped talking - a likely question
+        # boundary). Signature: on_segment(seq: int). It is deliberately
+        # NOT fired for max_chunk mid-talk flushes or forced/press
+        # flushes, so the consumer (speculative pre-generation) only
+        # triggers when a question has actually finished. Called OUTSIDE
+        # the lock on the worker thread; the callback must be cheap and
+        # non-blocking (it just kicks off a background task).
+        self.on_segment = None
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -244,14 +253,19 @@ class ContinuousTranscriber:
         if pending <= 0:
             return
 
-        # Decide whether to flush a chunk.
+        # Decide whether to flush a chunk, and remember WHY (the reason
+        # gates the pause callback used by speculative pre-generation).
         flush_end: int | None = None
+        reason = ""
         if pending >= self.max_chunk:
             flush_end = done + self.max_chunk
+            reason = "maxchunk"
         elif forced:
             flush_end = now
+            reason = "forced"
         elif pending >= self.min_chunk and self._looks_like_pause(now):
             flush_end = now
+            reason = "pause"
 
         if flush_end is None:
             return
@@ -285,6 +299,7 @@ class ContinuousTranscriber:
                 self._done_pos = flush_end
             return
 
+        fired_seq: int | None = None
         with self._lock:
             self._done_pos = flush_end
             if text:
@@ -295,7 +310,18 @@ class ContinuousTranscriber:
                 if len(self._segments) > self.max_segments:
                     self._segments = self._segments[-self.max_segments:]
                 print(
-                    f"[continuous] seg #{self._seq} "
-                    f"({(flush_end-done)/self.samplerate:.1f}s): {text[:80]!r}",
+                    f"[continuous] seg #{self._seq} ({reason}, "
+                    f"{(flush_end-done)/self.samplerate:.1f}s): {text[:80]!r}",
                     flush=True,
                 )
+                # Only a PAUSE-finalized segment marks a likely question
+                # boundary worth speculating on. Capture the seq to fire
+                # the callback outside the lock.
+                if reason == "pause":
+                    fired_seq = self._seq
+
+        if fired_seq is not None and self.on_segment is not None:
+            try:
+                self.on_segment(fired_seq)
+            except Exception:
+                traceback.print_exc()

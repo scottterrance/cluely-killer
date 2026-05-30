@@ -24,6 +24,7 @@ from __future__ import annotations
 import threading
 import time
 import traceback
+from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -37,6 +38,28 @@ from .history import ConversationHistory
 
 
 AnswerMode = Literal["short", "context"]
+
+
+@dataclass
+class _Speculation:
+    """A background-generated 'short' answer started on a pause.
+
+    Lifecycle: created when the interviewer pauses -> a worker thread
+    streams DeepSeek chunks into ``chunks`` -> the next matching '1'
+    press claims it and replays ``chunks`` (then live-streams any
+    remainder) instead of starting a fresh LLM call.
+    """
+    base_seq: int           # _last_seq at trigger time (what's "already answered")
+    target_seq: int         # the pause segment seq this answers
+    transcript: str         # the question text used for generation
+    cancel: threading.Event
+    lock: threading.Lock
+    chunks: list = field(default_factory=list)
+    done: bool = False
+    error: str | None = None
+    full: str = ""          # set when done (joined chunks, stripped)
+    ttft: float | None = None
+    started_at: float = 0.0
 
 
 def _friendly_error(exc: BaseException) -> str:
@@ -111,6 +134,10 @@ class Controller(QObject):
         # settings.continuous_stt is on, answers read the pre-built
         # background transcript instead of transcribing on the press.
         self.transcriber = transcriber
+        # Wire the pause callback so the transcriber can trigger
+        # speculative pre-generation when the interviewer stops talking.
+        if self.transcriber is not None:
+            self.transcriber.on_segment = self.on_pause_segment
         self._busy = threading.Lock()
         # Sample-position marker: "last sample we already consumed in a
         # successful answer". Initialized to -1 so the very first press
@@ -122,6 +149,11 @@ class Controller(QObject):
         # transcript segment already consumed". -1 means "first press,
         # take everything currently buffered".
         self._last_seq: int = -1
+        # ---- Speculative pre-generation state ----
+        # The in-flight / completed speculation (a pre-generated short
+        # answer started on an interviewer pause). Guarded by _spec_lock.
+        self._spec: _Speculation | None = None
+        self._spec_lock = threading.Lock()
 
     def _continuous_active(self) -> bool:
         return bool(self.transcriber) and bool(self.settings.continuous_stt)
@@ -175,6 +207,8 @@ class Controller(QObject):
     def clear(self) -> None:
         self.audio_buffer.clear()
         self.history.clear()
+        # Cancel any in-flight speculation - the topic is being reset.
+        self._cancel_spec("clear")
         # Reset to "next press starts a fresh capture window" by
         # snapping the marker to the buffer's current position. This
         # ensures the first press AFTER a clear sees only audio that
@@ -278,6 +312,161 @@ class Controller(QObject):
         except Exception:
             return text
 
+    # ---- Speculative pre-generation -----------------------------------
+    def _speculation_active(self) -> bool:
+        return (
+            bool(self.settings.speculative_enabled)
+            and self._continuous_active()
+        )
+
+    def _cancel_spec(self, reason: str = "") -> None:
+        """Cancel and drop the current speculation, if any."""
+        with self._spec_lock:
+            spec = self._spec
+            self._spec = None
+        if spec is not None:
+            spec.cancel.set()
+            if reason:
+                print(f"[spec] cancelled ({reason}) target_seq={spec.target_seq}", flush=True)
+
+    def on_pause_segment(self, seq: int) -> None:
+        """Called by the transcriber when a PAUSE-finalized segment lands
+        (a likely end-of-question). Kicks off a background short-mode
+        answer for everything since the last consumed segment.
+
+        Guards: feature on, continuous active, not currently answering,
+        and this seq is actually newer than what we'd answer from. A new
+        pause cancels any older in-flight speculation and replaces it.
+        """
+        if not self._speculation_active():
+            return
+        # If the user is mid-answer (a press is being served), don't
+        # speculate - the press path owns the flow.
+        if self._busy.locked():
+            return
+        base_seq = self._last_seq
+        # Read the same transcript a '1' press would, right now.
+        t = self.transcriber
+        try:
+            text, latest_seq, _covered = t.snapshot_since(
+                0 if base_seq < 0 else base_seq, self.settings.max_capture_seconds
+            )
+        except Exception:
+            return
+        text = self._clean_transcript(text)
+        if not text or len(text.strip()) < 3:
+            return
+
+        # Supersede any older speculation.
+        with self._spec_lock:
+            old = self._spec
+            if old is not None and not old.done and old.target_seq == latest_seq:
+                # Already speculating on this exact boundary; let it run.
+                return
+            if old is not None:
+                old.cancel.set()
+            spec = _Speculation(
+                base_seq=base_seq,
+                target_seq=latest_seq,
+                transcript=text,
+                cancel=threading.Event(),
+                lock=threading.Lock(),
+                started_at=time.monotonic(),
+            )
+            self._spec = spec
+        threading.Thread(
+            target=self._speculate, args=(spec,), daemon=True,
+            name="SpeculateWorker",
+        ).start()
+
+    def _speculate(self, spec: "_Speculation") -> None:
+        """Background worker: stream a short-mode answer into ``spec``."""
+        try:
+            include_example = False  # keep speculation cheap/deterministic
+            system_prompt = self.prompt_builder(self.settings, include_example)
+            llm = self.llm_factory(self.settings)
+            t0 = time.monotonic()
+            for chunk in llm.stream_chat(system_prompt, spec.transcript, prior_messages=[]):
+                if spec.cancel.is_set():
+                    print(f"[spec] worker aborted target_seq={spec.target_seq}", flush=True)
+                    return
+                with spec.lock:
+                    if spec.ttft is None:
+                        spec.ttft = time.monotonic() - t0
+                    spec.chunks.append(chunk)
+            with spec.lock:
+                spec.full = "".join(spec.chunks).strip()
+                spec.done = True
+            if not spec.cancel.is_set():
+                print(
+                    f"[spec] ready target_seq={spec.target_seq} "
+                    f"ttft={spec.ttft if spec.ttft is None else round(spec.ttft,2)}s "
+                    f"chars={len(spec.full)}",
+                    flush=True,
+                )
+        except Exception as e:
+            with spec.lock:
+                spec.error = _friendly_error(e)
+                spec.done = True
+            traceback.print_exc()
+
+    def _claim_spec(self, mode: AnswerMode):
+        """Return a usable speculation for THIS press, or None.
+
+        Match criteria (all must hold):
+          * feature active and mode == 'short' (context mode always
+            generates fresh - prior turns differ from the spec).
+          * a spec exists, not cancelled, no error.
+          * spec.base_seq == self._last_seq  (we haven't answered since
+            it was started - so it answers the right starting point).
+          * spec.target_seq == transcriber.current_seq() (no NEWER pause
+            segment has landed - i.e. the interviewer didn't keep talking
+            after the pause we speculated on). This guards against
+            answering a stale/partial question.
+        On a match the spec is detached (removed from self._spec) and
+        returned; the caller drains it.
+        """
+        if mode != "short" or not self._speculation_active():
+            return None
+        with self._spec_lock:
+            spec = self._spec
+            if spec is None or spec.error:
+                return None
+            if spec.cancel.is_set():
+                return None
+            if spec.base_seq != self._last_seq:
+                return None
+            try:
+                cur = self.transcriber.current_seq()
+            except Exception:
+                return None
+            if spec.target_seq != cur:
+                # A newer segment arrived after the speculated pause;
+                # the question likely continued. Don't serve stale.
+                return None
+            # Claim it.
+            self._spec = None
+            return spec
+
+    def _drain_spec(self, spec: "_Speculation"):
+        """Yield the spec's chunks as they arrive (replay buffered ones,
+        then live-stream the remainder until done).
+        """
+        idx = 0
+        while True:
+            with spec.lock:
+                avail = len(spec.chunks)
+                done = spec.done
+                err = spec.error
+            while idx < avail:
+                yield spec.chunks[idx]
+                idx += 1
+            if err:
+                raise RuntimeError(err)
+            if done and idx >= avail:
+                return
+            time.sleep(0.02)
+
     def _do_answer(self, mode: AnswerMode) -> None:
         press_t0 = time.monotonic()
         try:
@@ -285,8 +474,24 @@ class Controller(QObject):
             commit_marker = None
             stt_label = "?"
             stt_t0 = time.monotonic()
+            claimed_spec = None
 
-            if self._continuous_active():
+            # FASTEST PATH: a pre-generated answer from an interviewer
+            # pause is already (partly) streamed. Claim it and skip STT +
+            # the fresh LLM call entirely.
+            claimed_spec = self._claim_spec(mode)
+            if claimed_spec is not None:
+                transcript = claimed_spec.transcript
+                source_label = f"SPECULATED target_seq={claimed_spec.target_seq}"
+                stt_label = "local (continuous, pre-gen)"
+                captured_seconds = 0.0
+                _target_seq = claimed_spec.target_seq
+
+                def commit_marker():  # noqa: F811 - intentional rebinding
+                    self._last_seq = _target_seq
+
+                print(f"[spec] CLAIMED pre-generated answer target_seq={_target_seq}", flush=True)
+            elif self._continuous_active():
                 # Phase 2 fast path: transcript already exists.
                 transcript, source_label, commit_marker = self._transcript_continuous()
                 if not transcript:
@@ -327,15 +532,21 @@ class Controller(QObject):
             self.status.emit(f"Thinking ({mode})...")
             include_example = self.scheduler.should_include()
             system_prompt = self.prompt_builder(self.settings, include_example)
-            llm = self.llm_factory(self.settings)
             # The mode picks whether prior turns are shipped to the LLM.
             # ``short``  -> isolated answer, no follow-up gravity.
             # ``context`` -> last 5 Q+A pairs as chat history.
             prior = self.history.as_messages() if mode == "context" else []
             print(
-                f"[answer] mode={mode} history_turns_sent={len(prior)//2}",
+                f"[answer] mode={mode} history_turns_sent={len(prior)//2} "
+                f"speculated={claimed_spec is not None}",
                 flush=True,
             )
+
+            # If we did NOT claim a spec, any in-flight speculation is now
+            # stale (this fresh answer supersedes it). Cancel it so its
+            # worker thread stops and can't be claimed by a later press.
+            if claimed_spec is None:
+                self._cancel_spec("superseded by fresh press")
 
             self.answer_started.emit()
             chunks: list[str] = []
@@ -345,9 +556,16 @@ class Controller(QObject):
             llm_t0 = time.monotonic()
             ttft: float | None = None
             try:
-                for chunk in llm.stream_chat(
-                    system_prompt, transcript, prior_messages=prior
-                ):
+                if claimed_spec is not None:
+                    # Replay the pre-generated chunks (instant), then
+                    # live-stream any remainder until the worker finishes.
+                    stream = self._drain_spec(claimed_spec)
+                else:
+                    llm = self.llm_factory(self.settings)
+                    stream = llm.stream_chat(
+                        system_prompt, transcript, prior_messages=prior
+                    )
+                for chunk in stream:
                     if ttft is None:
                         ttft = time.monotonic() - llm_t0
                     chunks.append(chunk)

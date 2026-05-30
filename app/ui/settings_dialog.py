@@ -140,6 +140,21 @@ class SettingsDialog(QDialog):
             "faster. Pick <b>Concise</b> for the fastest replies.</i>"
         ))
 
+        # Speculative pre-generation: start answering on the interviewer's
+        # pause, BEFORE the key press, so the answer appears instantly.
+        self.speculative_check = QCheckBox(
+            "Pre-generate answers on pause (instant replies)"
+        )
+        self.speculative_check.setChecked(self.settings.speculative_enabled)
+        f.addRow(self.speculative_check)
+        f.addRow(QLabel(
+            "<i>When the interviewer <b>pauses</b> (likely finished asking), the "
+            "app starts generating the <b>'1' (short)</b> answer in the "
+            "background. Press '1' and it's already (mostly) done - hiding "
+            "DeepSeek's typing time behind the pause. Uses a few extra tokens "
+            "on guesses you skip. Needs continuous transcription on.</i>"
+        ))
+
         f.addRow(QLabel(
             "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
             "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
@@ -528,6 +543,7 @@ class SettingsDialog(QDialog):
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
         s.answer_brevity = self.brevity_combo.currentData() or "concise"
+        s.speculative_enabled = self.speculative_check.isChecked()
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()
