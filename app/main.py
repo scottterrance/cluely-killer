@@ -243,6 +243,18 @@ def main() -> None:
     )
     _say("controller ready (memory keeps last 5 Q+A turns).")
 
+    # When the controller auto-switches STT (local kept lagging -> cloud),
+    # persist the change to config.json and stop the now-unneeded
+    # background transcriber thread so it stops pegging the CPU.
+    def _on_settings_mutated() -> None:
+        save_settings(settings)
+        try:
+            controller.apply_continuous_setting()  # stops thread if now off
+        except Exception:
+            pass
+        whisper.invalidate()  # ensure next press builds the cloud engine
+    controller.on_settings_mutated = _on_settings_mutated
+
     # ---- UI ----
     _say("building overlay window...")
     hotkeys = HotkeyManager()

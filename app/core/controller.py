@@ -127,13 +127,60 @@ class Controller(QObject):
         # transcript segment already consumed". -1 means "first press,
         # take everything currently buffered".
         self._last_seq: int = -1
-        # Count of consecutive presses where the local background STT was
-        # lagging (backlog > threshold). Used to nudge the user toward
-        # cloud STT after a few hits.
+        # Count of presses where the local background STT was lagging
+        # (backlog > threshold). After enough hits we AUTO-SWITCH to
+        # cloud STT (see _maybe_auto_switch_stt) to break the
+        # CPU-saturation / runaway-backlog feedback loop without the user
+        # having to open Settings mid-interview.
         self._slow_stt_hits: int = 0
+        # Set True once we've auto-switched so we don't do it repeatedly.
+        self._auto_switched_stt: bool = False
+        # Optional hook set by main.py: called after the controller
+        # mutates settings (e.g. auto-switch) so the app can persist
+        # config.json and stop the now-unneeded background thread. Keeps
+        # the controller decoupled from save_settings / the transcriber
+        # lifecycle owned by main.
+        self.on_settings_mutated = None
 
     def _continuous_active(self) -> bool:
         return bool(self.transcriber) and bool(self.settings.continuous_stt)
+
+    def _maybe_auto_switch_stt(self) -> None:
+        """If the local background STT keeps lagging and a Groq key is
+        available, automatically flip to cloud STT + disable continuous
+        mode. This is the decisive fix for slow CPUs: rather than only
+        suggesting it, we DO it, so answers stop tracking stale questions
+        and the CPU stops being pegged by an unwinnable local transcribe
+        loop.
+
+        Guarded so it happens at most once per session and only when
+        cloud is actually usable.
+        """
+        if self._auto_switched_stt:
+            return
+        if self._slow_stt_hits < 3:
+            return
+        if not self.settings.groq_api_key:
+            return  # no cloud fallback available; keep nudging via status
+        self._auto_switched_stt = True
+        self.settings.stt_backend = "cloud"
+        self.settings.continuous_stt = False
+        self.status.emit(
+            "Local STT was lagging - auto-switched to Cloud turbo (Groq) "
+            "for instant, accurate transcription."
+        )
+        print(
+            "[controller] AUTO-SWITCH: local STT lagged 3x with a Groq key "
+            "present -> stt_backend='cloud', continuous_stt=False.",
+            flush=True,
+        )
+        # Let main.py persist the change and stop the background thread.
+        cb = self.on_settings_mutated
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                traceback.print_exc()
 
     def apply_continuous_setting(self) -> None:
         """Start or stop the background transcriber to match the current
@@ -262,13 +309,9 @@ class Controller(QObject):
                 self._last_seq = latest_seq
 
             via = "cloud" if fast is not None else "local"
-            # If the local background loop keeps falling behind, nudge the
-            # user to switch STT to cloud (one-time-ish hint).
-            if self._slow_stt_hits == 3 and self.settings.groq_api_key:
-                self.status.emit(
-                    "Local STT keeps lagging - consider Settings -> AI "
-                    "Provider -> Transcription = Cloud turbo for instant STT."
-                )
+            # If the local background loop keeps falling behind, auto-switch
+            # to cloud STT (one time) to break the lag feedback loop.
+            self._maybe_auto_switch_stt()
             label = f"continuous RECENT via {via} (backlog was {backlog:.0f}s)"
             return text, label, commit
 
