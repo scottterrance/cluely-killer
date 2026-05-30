@@ -135,19 +135,17 @@ def main() -> None:
     from .stt.router import STTRouter
 
     whisper = STTRouter(settings)
-    # Eagerly build the primary backend so model-load / key errors show
-    # up at startup (and the local model warms up) rather than on the
-    # first hotkey press. Failure here is non-fatal: the router will try
-    # the other backend on first use. We warm the first backend that can
-    # actually be built so a cloud-primary user with no local model (or
-    # vice-versa) still gets a warm engine.
-    for _b in whisper._order():
-        try:
-            whisper._engine(_b)
-            _say(f"STT backend '{_b}' ready (primary warm).")
-            break
-        except Exception as e:
-            _say(f"STT backend '{_b}' not ready ({e}); trying next...")
+    # Eagerly build ONLY the selected primary backend so its
+    # key/model/load errors surface at startup. We deliberately do NOT
+    # pre-build the OTHER backend: when the user picked cloud, loading
+    # the 1.5GB local model wastes ~RAM and CPU for nothing (and vice
+    # versa). The router lazily builds the fallback only if the primary
+    # actually fails at call time.
+    try:
+        whisper._engine(settings.stt_backend)
+        _say(f"STT backend '{settings.stt_backend}' ready (primary warm).")
+    except Exception as e:
+        _say(f"STT primary '{settings.stt_backend}' not ready ({e}); fallback will be tried on first use.")
 
     # ---- Continuous background transcription (Phase 2) ----
     # A daemon thread transcribes the audio buffer as the interviewer
@@ -156,8 +154,23 @@ def main() -> None:
     # so Whisper is off the press critical path. If the local model
     # isn't available we disable continuous mode and fall back to the
     # classic transcribe-on-press path.
+    #
+    # CRITICAL: only run the background loop when STT backend is LOCAL.
+    # When the backend is CLOUD, a local loop is pure harm - it pegs the
+    # CPU running large-v3-turbo, which (a) starves the audio capture
+    # thread (the 'data discontinuity' warnings) and (b) delays Python
+    # reading the cloud HTTP response, inflating cloud round-trips. The
+    # field logs proved this: STT spiked to 17s/33s WHILE the local loop
+    # ran, then settled to ~5s the moment it was stopped.
     transcriber = None
-    if settings.continuous_stt:
+    want_continuous = settings.continuous_stt and settings.stt_backend == "local"
+    if settings.continuous_stt and settings.stt_backend != "local":
+        _say(
+            "continuous STT requested but STT backend is 'cloud' -> NOT "
+            "starting the local loop (it would peg the CPU and slow cloud "
+            "calls). Cloud transcribes on press."
+        )
+    if want_continuous:
         try:
             local_engine = whisper._get_local()
             from .stt.continuous import ContinuousTranscriber
@@ -174,7 +187,7 @@ def main() -> None:
                 f"transcribe-on-press path instead."
             )
     else:
-        _say("continuous STT OFF (classic transcribe-on-press path).")
+        _say("continuous STT OFF (transcribe-on-press path).")
 
     # Bias Whisper toward the candidate's own vocabulary (names, tech,
     # company terms) extracted from resume / JD / about-me. Big accuracy

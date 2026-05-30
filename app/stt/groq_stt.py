@@ -41,23 +41,38 @@ DEFAULT_MODEL = "whisper-large-v3-turbo"
 MAX_UPLOAD_SECONDS = 15.0
 
 
-def _trim_silence(audio: np.ndarray, samplerate: int, max_seconds: float) -> np.ndarray:
-    """Trim leading/trailing silence and cap to the most-recent
-    ``max_seconds`` of SPEECH.
+def _isolate_last_utterance(
+    audio: np.ndarray,
+    samplerate: int,
+    max_seconds: float,
+    min_seconds: float = 6.0,
+    pause_seconds: float = 1.2,
+) -> np.ndarray:
+    """Return only the most-recent UTTERANCE, silence-trimmed and capped.
 
-    Why: a press often captures dead air before the question and a beat
-    of silence after, plus (on the escape-hatch path) a wide window that
-    may include the tail of a previous question. We keep only the
-    contiguous spoken region, which is what matters and what makes the
-    upload small.
+    A press almost always lands right after the interviewer finishes
+    asking, so the audio looks like:
+        [candidate's previous answer] ... <pause> ... [the question] (press)
+    We only want the question. This:
+      1. Trims leading/trailing silence (frame RMS gate, 50ms frames).
+      2. Within the spoken region, finds the LAST internal pause >=
+         ``pause_seconds`` (a real turn boundary, not a mid-sentence
+         breath) and keeps only what comes AFTER it.
+      3. Never returns less than ``min_seconds`` (so a question that
+         itself contains a short pause isn't truncated), and never more
+         than ``max_seconds``.
 
-    Conservative: frame-based RMS gate with generous padding. If we
-    can't find a clear speech region we fall back to "the last
-    max_seconds of audio" rather than risk cutting the question.
+    Sending the question alone instead of the whole 15s window roughly
+    halves Groq STT time (latency scales with audio length) and removes
+    cross-talk from the candidate's own speech, improving accuracy.
+
+    Conservative fallback: if no clear speech is found, return the last
+    ``max_seconds`` so we never accidentally send empty/clipped audio.
     """
     if audio.size == 0:
         return audio
     cap = int(max(1.0, max_seconds) * samplerate)
+    floor = int(max(1.0, min_seconds) * samplerate)
     frame = max(1, int(0.05 * samplerate))  # 50 ms frames
     n_frames = audio.size // frame
     if n_frames < 2:
@@ -65,7 +80,65 @@ def _trim_silence(audio: np.ndarray, samplerate: int, max_seconds: float) -> np.
     trimmed_len = n_frames * frame
     frames = audio[:trimmed_len].reshape(n_frames, frame)
     rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
-    # Adaptive threshold: above the noise floor but below speech level.
+    peak = float(rms.max()) if rms.size else 0.0
+    if peak <= 0:
+        return audio[-cap:]
+    thresh = max(peak * 0.18, 0.004)
+    voiced_mask = rms > thresh
+    voiced = np.where(voiced_mask)[0]
+    if voiced.size == 0:
+        return audio[-cap:]
+
+    # Trim to the contiguous speech region first.
+    pad = int(0.2 * samplerate)
+    region_start = max(0, voiced[0] * frame - pad)
+    region_end = min(audio.size, (voiced[-1] + 1) * frame + pad)
+
+    # Find the last internal pause >= pause_seconds within the region.
+    pause_frames = max(1, int(pause_seconds / 0.05))  # frames of silence
+    last_voiced = voiced[-1]
+    # Walk backwards over the voiced frames looking for a gap.
+    cut_frame = voiced[0]
+    run = 0
+    prev = voiced[0]
+    # Build the set of silent frames between first and last voiced frame.
+    for f in range(last_voiced, voiced[0], -1):
+        if not voiced_mask[f]:
+            run += 1
+            if run >= pause_frames:
+                cut_frame = f + run  # start of speech after this pause
+                break
+        else:
+            run = 0
+    utt_start = max(region_start, cut_frame * frame)
+    utt = audio[utt_start:region_end]
+
+    # Enforce the min floor: if the isolated utterance is shorter than
+    # min_seconds, widen the window backwards (the question may contain
+    # its own short pause we cut on).
+    if utt.size < floor:
+        utt = audio[max(region_start, region_end - floor):region_end]
+    # Enforce the max cap.
+    if utt.size > cap:
+        utt = utt[-cap:]
+    return utt
+
+
+def _trim_silence(audio: np.ndarray, samplerate: int, max_seconds: float) -> np.ndarray:
+    """Backwards-compatible alias: trim silence + cap (no utterance split).
+
+    Retained for callers/tests that want the simple behavior.
+    """
+    if audio.size == 0:
+        return audio
+    cap = int(max(1.0, max_seconds) * samplerate)
+    frame = max(1, int(0.05 * samplerate))
+    n_frames = audio.size // frame
+    if n_frames < 2:
+        return audio[-cap:]
+    trimmed_len = n_frames * frame
+    frames = audio[:trimmed_len].reshape(n_frames, frame)
+    rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
     peak = float(rms.max()) if rms.size else 0.0
     if peak <= 0:
         return audio[-cap:]
@@ -73,11 +146,10 @@ def _trim_silence(audio: np.ndarray, samplerate: int, max_seconds: float) -> np.
     voiced = np.where(rms > thresh)[0]
     if voiced.size == 0:
         return audio[-cap:]
-    pad = int(0.2 * samplerate)  # 200 ms padding each side
+    pad = int(0.2 * samplerate)
     start = max(0, voiced[0] * frame - pad)
     end = min(audio.size, (voiced[-1] + 1) * frame + pad)
     speech = audio[start:end]
-    # Keep only the most-recent cap seconds of the speech region.
     return speech[-cap:] if speech.size > cap else speech
 
 
@@ -112,6 +184,14 @@ class GroqSTTEngine(STTEngine):
         self.model = (model or DEFAULT_MODEL).strip()
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._prompt: str | None = None
+        # Persistent keep-alive client: reuses one TLS connection across
+        # presses, removing a fresh handshake (~0.3-0.8s) every call.
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=4, keepalive_expiry=300.0),
+        )
         print(
             f"[groq-stt] cloud STT ready (model={self.model!r}); "
             f"audio will be uploaded to Groq for transcription.",
@@ -133,11 +213,12 @@ class GroqSTTEngine(STTEngine):
         if audio is None or audio.size < self.samplerate * 0.5:
             return ""
         audio = audio.astype(np.float32, copy=False)
-        # Trim silence + cap the upload. The dashboard showed fixed 30s
-        # uploads causing 6-13s queue latency; sending only the spoken
-        # region (<=15s) shrinks the payload dramatically.
+        # Isolate just the interviewer's LAST utterance (the question),
+        # silence-trimmed and capped. Sending the question alone instead
+        # of the whole window roughly halves STT time (latency scales
+        # with audio length) and removes the candidate's own speech.
         raw_secs = audio.size / self.samplerate
-        audio = _trim_silence(audio, self.samplerate, MAX_UPLOAD_SECONDS)
+        audio = _isolate_last_utterance(audio, self.samplerate, MAX_UPLOAD_SECONDS)
         sent_secs = audio.size / self.samplerate
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak == 0.0:
@@ -157,16 +238,12 @@ class GroqSTTEngine(STTEngine):
         if self._prompt:
             data["prompt"] = self._prompt
 
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-
         t0 = time.monotonic()
         try:
-            resp = httpx.post(
-                f"{self.base_url}/audio/transcriptions",
-                headers=headers,
+            resp = self._client.post(
+                "/audio/transcriptions",
                 files=files,
                 data=data,
-                timeout=httpx.Timeout(60.0, connect=10.0),
             )
         except httpx.RequestError as e:
             raise RuntimeError(
@@ -182,7 +259,7 @@ class GroqSTTEngine(STTEngine):
         # STT, not the LLM, was the bottleneck).
         print(
             f"[groq-stt] uploaded {sent_secs:.1f}s audio "
-            f"(trimmed from {raw_secs:.1f}s, {len(wav_bytes)//1024} KB) -> "
+            f"(isolated from {raw_secs:.1f}s, {len(wav_bytes)//1024} KB) -> "
             f"{elapsed:.2f}s round-trip",
             flush=True,
         )
