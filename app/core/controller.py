@@ -52,22 +52,26 @@ def _friendly_error(exc: BaseException) -> str:
         or "11001" in msg
     ):
         return (
-            "DNS lookup failed - cannot reach api.deepseek.com. "
+            "DNS lookup failed - cannot reach the AI provider. "
             "Check your WiFi / corporate firewall."
         )
     if "403" in msg or cls == "PermissionDeniedError" or "access denied" in low:
-        return "DeepSeek blocked the request (HTTP 403). Check your API key in Settings."
+        return "Provider blocked the request (HTTP 403). Check your API key in Settings -> AI Provider."
     if "401" in msg or cls == "AuthenticationError" or "invalid api key" in low:
         return "API key is invalid or revoked. Check Settings -> AI Provider."
-    if "429" in msg or cls == "RateLimitError" or "rate limit" in low:
-        return "DeepSeek rate limit hit. Wait a minute and try again."
+    if "429" in msg or cls == "RateLimitError" or "rate limit" in low or "quota" in low:
+        return (
+            "Rate limit / out of tokens. If you're on Groq's free tier you may have "
+            "run out - switch the LLM (and STT) backend to DeepSeek/local in "
+            "Settings -> AI Provider, or wait and retry."
+        )
     if (
         cls in ("APIConnectionError", "ConnectionError", "ConnectError",
                 "ConnectTimeout", "ReadTimeout", "TimeoutException")
         or "connection" in low
         or "timed out" in low
     ):
-        return "Network error reaching DeepSeek. Check your internet."
+        return "Network error reaching the AI provider. Check your internet."
     return f"{cls}: {msg}"[:200]
 
 
@@ -188,7 +192,8 @@ class Controller(QObject):
             # ``context`` -> last 5 Q+A pairs as chat history.
             prior = self.history.as_messages() if mode == "context" else []
             print(
-                f"[answer] provider=deepseek mode={mode} "
+                f"[answer] llm_backend={self.settings.llm_backend} "
+                f"stt_backend={self.settings.stt_backend} mode={mode} "
                 f"history_turns_sent={len(prior)//2}",
                 flush=True,
             )

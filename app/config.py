@@ -20,7 +20,34 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 @dataclass
 class Settings:
-    # ---- LLM provider (DeepSeek only) ----
+    # ====================================================================
+    # BACKEND SELECTION
+    # ====================================================================
+    # Which cloud LLM answers questions:
+    #   "groq"     - Groq (fast, free tier). DEFAULT.
+    #   "deepseek" - DeepSeek (cheap, stable). Fall back here when the
+    #                Groq free-tier tokens run out.
+    llm_backend: str = "groq"
+    # Which engine transcribes audio:
+    #   "cloud" - Groq-hosted Whisper large-v3-turbo (fast, needs net,
+    #             uses Groq quota). DEFAULT when a Groq key is present.
+    #   "local" - bundled faster-whisper (offline, uses your CPU). Fall
+    #             back here when Groq tokens run out or you're offline.
+    stt_backend: str = "cloud"
+
+    # ---- Groq (cloud LLM + cloud STT) ----
+    # One free key powers BOTH the chat model and the cloud Whisper STT.
+    # Get it at https://console.groq.com/keys.
+    groq_api_key: str = ""
+    # Chat model. 'llama-3.3-70b-versatile' is a strong default; use
+    # 'llama-3.1-8b-instant' for max speed, or a gpt-oss model for more
+    # quality. Must be a model your Groq account can access.
+    groq_model: str = "llama-3.3-70b-versatile"
+    # Cloud STT model hosted on Groq.
+    groq_stt_model: str = "whisper-large-v3-turbo"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+
+    # ---- DeepSeek (cloud LLM fallback) ----
     # Get a key at https://platform.deepseek.com/api_keys.
     # Pricing ~$0.14/M input + $0.28/M output for deepseek-chat,
     # so a typical interview Q+A is well under a tenth of a cent.
@@ -135,6 +162,21 @@ def load_settings() -> Settings:
             if s.whisper_model == "small":
                 s.whisper_model = "large-v3-turbo"
                 print("[config] migrated whisper_model 'small' -> 'large-v3-turbo'")
+            # Backend migration for configs written before Groq support
+            # existed. Heuristic: if the user has no Groq key but DOES
+            # have a DeepSeek key, they're an existing DeepSeek user -
+            # keep them on DeepSeek + local STT so nothing breaks on
+            # upgrade. A fresh install (no keys) keeps the new
+            # groq/cloud defaults so the first-run experience points at
+            # the fast path. Once a Groq key is entered in Settings the
+            # user can flip the backends explicitly.
+            if not s.groq_api_key and s.deepseek_api_key:
+                if s.llm_backend == "groq":
+                    s.llm_backend = "deepseek"
+                    print("[config] no Groq key + DeepSeek key present -> llm_backend='deepseek'")
+                if s.stt_backend == "cloud":
+                    s.stt_backend = "local"
+                    print("[config] no Groq key -> stt_backend='local'")
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")

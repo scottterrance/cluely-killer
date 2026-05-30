@@ -105,20 +105,53 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
+        # ---- Backend selectors (the two dropdowns the user asked for) ----
+        self.llm_backend_combo = QComboBox()
+        self.llm_backend_combo.addItem("Groq (cloud, fast, free tier)", "groq")
+        self.llm_backend_combo.addItem("DeepSeek (cloud, cheap, stable)", "deepseek")
+        i = self.llm_backend_combo.findData(self.settings.llm_backend)
+        self.llm_backend_combo.setCurrentIndex(i if i >= 0 else 0)
+
+        self.stt_backend_combo = QComboBox()
+        self.stt_backend_combo.addItem("Cloud turbo (Groq Whisper large-v3-turbo)", "cloud")
+        self.stt_backend_combo.addItem("Local turbo (bundled faster-whisper)", "local")
+        i = self.stt_backend_combo.findData(self.settings.stt_backend)
+        self.stt_backend_combo.setCurrentIndex(i if i >= 0 else 0)
+
+        f.addRow(QLabel("<b>Backends</b> <i>(the app auto-falls-back to the other "
+                        "if the chosen one errors - e.g. Groq free tokens run out)</i>"))
+        f.addRow("Answer engine (LLM):", self.llm_backend_combo)
+        f.addRow("Transcription (STT):", self.stt_backend_combo)
+
+        # ---- Groq ----
+        self.groq_key = QLineEdit(self.settings.groq_api_key)
+        self.groq_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.groq_model = QLineEdit(self.settings.groq_model)
+        self.groq_stt_model = QLineEdit(self.settings.groq_stt_model)
+        f.addRow(QLabel(
+            "<hr><b>Groq (one free key powers BOTH cloud chat + cloud STT)</b>"
+            "<br><i>Get a free key at <code>https://console.groq.com/keys</code>. "
+            "Chat models: <code>llama-3.3-70b-versatile</code> (recommended) or "
+            "<code>llama-3.1-8b-instant</code> (fastest).</i>"
+        ))
+        f.addRow("Groq API key:", self.groq_key)
+        f.addRow("Groq chat model:", self.groq_model)
+        f.addRow("Groq STT model:", self.groq_stt_model)
+
+        # ---- DeepSeek ----
         self.deepseek_key = QLineEdit(self.settings.deepseek_api_key)
         self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.deepseek_model = QLineEdit(self.settings.deepseek_model)
         self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
-
         f.addRow(QLabel(
-            "<b>DeepSeek (cloud, OpenAI-compatible, ~$0.14/M tokens)</b>"
+            "<hr><b>DeepSeek (cloud LLM fallback, ~$0.14/M tokens)</b>"
             "<br><i>Get a key at <code>https://platform.deepseek.com/api_keys</code>. "
             "Models: <code>deepseek-chat</code> (V3, fast - recommended) or "
             "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
         ))
-        f.addRow("API key:", self.deepseek_key)
-        f.addRow("Model:", self.deepseek_model)
-        f.addRow("Base URL:", self.deepseek_base_url)
+        f.addRow("DeepSeek API key:", self.deepseek_key)
+        f.addRow("DeepSeek model:", self.deepseek_model)
+        f.addRow("DeepSeek base URL:", self.deepseek_base_url)
         return w
 
     def _context_tab(self) -> QWidget:
@@ -362,12 +395,13 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
-        # Whisper model is locked to 'small' - the model files are
-        # bundled inside the .exe folder and that's the only one
-        # available offline. Showing a dropdown that lets the user pick
-        # 'medium' or 'large-v3' would just trigger a 1-3 GB download
-        # attempt that fails because we're locked offline.
-        self.whisper_model_label = QLabel(f"<code>{self.settings.whisper_model}</code> (bundled, offline-only)")
+        # The STT backend itself is chosen on the AI Provider tab. This
+        # tab only configures the LOCAL model + the capture windows. The
+        # local model is the one bundled next to the .exe (offline); the
+        # cloud STT model is set on the AI Provider tab.
+        self.whisper_model_label = QLabel(
+            f"<code>{self.settings.whisper_model}</code> (bundled local model, offline)"
+        )
 
         # First-press fallback window. Only used on the very first
         # answer of a session, before the since-last-press marker has
@@ -386,11 +420,14 @@ class SettingsDialog(QDialog):
         self.max_capture_spin.setSingleStep(5.0)
         self.max_capture_spin.setValue(self.settings.max_capture_seconds)
 
-        f.addRow("Whisper model:", self.whisper_model_label)
+        f.addRow("Local Whisper model:", self.whisper_model_label)
         f.addRow("First-press window (sec):", self.window_spin)
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(QLabel(
-            "<i>Each press of '1' or '2' transcribes everything the "
+            "<i>Choose <b>Cloud turbo</b> vs <b>Local turbo</b> on the "
+            "<b>AI Provider</b> tab. Cloud is faster on most machines and "
+            "uses your Groq quota; Local runs offline on your CPU.<br><br>"
+            "Each press of '1' or '2' transcribes everything the "
             "interviewer said since the previous press, capped at "
             "<b>Max capture</b>. Press more often = tighter transcripts.</i>"
         ))
@@ -441,6 +478,17 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _save(self) -> None:
         s = self.settings
+
+        # Backend selectors
+        s.llm_backend = self.llm_backend_combo.currentData() or "groq"
+        s.stt_backend = self.stt_backend_combo.currentData() or "cloud"
+
+        # Groq
+        s.groq_api_key = self.groq_key.text().strip()
+        s.groq_model = self.groq_model.text().strip() or "llama-3.3-70b-versatile"
+        s.groq_stt_model = self.groq_stt_model.text().strip() or "whisper-large-v3-turbo"
+
+        # DeepSeek
         s.deepseek_api_key = self.deepseek_key.text().strip()
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"

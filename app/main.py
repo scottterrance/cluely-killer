@@ -50,7 +50,7 @@ def main() -> None:
     if simple_mode:
         _say("--simple: using a normal titled window.")
 
-    # DeepSeek key from .env if present (only loaded if user hasn't
+    # API keys from .env if present (only loaded if the user hasn't
     # already entered one in Settings).
     ds_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if ds_key and not settings.deepseek_api_key:
@@ -65,6 +65,16 @@ def main() -> None:
     if ds_model_env:
         settings.deepseek_model = ds_model_env
         _say(f"DEEPSEEK_MODEL override = {ds_model_env!r}")
+
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    if groq_key and not settings.groq_api_key:
+        settings.groq_api_key = groq_key
+        save_settings(settings)
+        _say("loaded GROQ_API_KEY from .env")
+    groq_model_env = os.getenv("GROQ_MODEL", "").strip()
+    if groq_model_env:
+        settings.groq_model = groq_model_env
+        _say(f"GROQ_MODEL override = {groq_model_env!r}")
 
     _say("creating QApplication...")
     from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -117,21 +127,23 @@ def main() -> None:
     capture.start()
     _say("audio capture started.")
 
-    # ---- STT (bundled 'small' model, offline) ----
+    # ---- STT (router: cloud Groq turbo OR local faster-whisper) ----
     _say(
-        f"loading faster-whisper '{settings.whisper_model}' "
-        f"({settings.whisper_compute} on {settings.whisper_device}) "
-        f"from bundled cache..."
+        f"initializing STT (backend={settings.stt_backend!r}; "
+        f"local model '{settings.whisper_model}', cloud '{settings.groq_stt_model}')..."
     )
-    from .stt.whisper_engine import WhisperEngine
+    from .stt.router import STTRouter
 
-    whisper = WhisperEngine(
-        model_size=settings.whisper_model,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute,
-        allow_auto_download=settings.whisper_allow_auto_download,
-    )
-    _say("Whisper model loaded.")
+    whisper = STTRouter(settings)
+    # Eagerly build the primary backend so model-load / key errors show
+    # up at startup (and the local model warms up) rather than on the
+    # first hotkey press. Failure here is non-fatal: the router will try
+    # the other backend on first use.
+    try:
+        whisper._engine(whisper._order()[0])
+        _say(f"STT primary backend '{whisper._order()[0]}' ready.")
+    except Exception as e:
+        _say(f"STT primary backend not ready ({e}); will use fallback on first press.")
 
     # Bias Whisper toward the candidate's own vocabulary (names, tech,
     # company terms) extracted from resume / JD / about-me. Big accuracy
@@ -155,18 +167,17 @@ def main() -> None:
     from .core.history import ConversationHistory
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
-    from .llm.deepseek_provider import DeepSeekProvider
+    from .llm.router import LLMRouter
     from .prompts.builder import ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
 
     def _llm_factory(s) -> LLMProvider:
-        return DeepSeekProvider(
-            api_key=s.deepseek_api_key,
-            model=s.deepseek_model,
-            base_url=s.deepseek_base_url,
-        )
+        # Router picks Groq or DeepSeek per s.llm_backend and falls back
+        # to the other automatically if the primary errors before the
+        # first token (e.g. Groq free-tier tokens exhausted).
+        return LLMRouter(s)
 
     def _prompt_for(s, include_example: bool) -> str:
         return build_system_prompt(
@@ -209,6 +220,9 @@ def main() -> None:
             # Resume / JD / about-me may have changed -> rebuild the
             # Whisper biasing vocabulary so STT accuracy tracks the new
             # context immediately (no restart needed).
+            # Also drop the cached cloud STT client so a new Groq key /
+            # model / STT backend selection takes effect on the next press.
+            whisper.invalidate()
             _refresh_whisper_bias()
 
     overlay = OverlayWindow(
