@@ -60,7 +60,40 @@ _CAP_SPAN = re.compile(r"\b(?:[A-Z][a-zA-Z]+(?:\s+|$)){2,4}")
 _CAP_WORD = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
 
 
-def extract_keywords(text: str, limit: int = 40) -> list[str]:
+def _is_clean_single(token: str) -> bool:
+    """Reject mangled tokens that pollute the glossary and make Whisper
+    hallucinate (the 'DevOpsunmatched' / 'VisualizationEducation' problem
+    from PDF text where words get glued together with no space).
+
+    Rules for a SINGLE word token:
+      * length 2..14 (real tech terms are short; >14 is almost always
+        two words glued together).
+      * a CamelCase token may have AT MOST one lowercase->uppercase
+        transition. 'PyTorch'/'GraphQL'/'TensorFlow' have exactly one;
+        'DevOpsunmatched' technically has one too, so we ALSO cap the
+        trailing lowercase run: if the part after the last capital is a
+        long word (>=7 letters) the token is almost certainly two words
+        glued, so drop it. That keeps 'TensorFlow'(flow=4),
+        'SharePoint'(point=5) and drops 'DevOpsunmatched'(unmatched=9).
+    """
+    if not (2 <= len(token) <= 14):
+        return False
+    # Count internal lowercase->uppercase transitions.
+    transitions = sum(
+        1 for a, b in zip(token, token[1:]) if a.islower() and b.isupper()
+    )
+    if transitions >= 2:
+        return False
+    if transitions == 1:
+        # Trailing lowercase run after the final uppercase letter.
+        last_upper = max(i for i, c in enumerate(token) if c.isupper())
+        tail = token[last_upper + 1:]
+        if len(tail) >= 7:  # 'unmatched', 'education' -> glued word
+            return False
+    return True
+
+
+def extract_keywords(text: str, limit: int = 32) -> list[str]:
     """Pull a deduped, order-preserving keyword list out of free text."""
     if not text or not text.strip():
         return []
@@ -68,13 +101,24 @@ def extract_keywords(text: str, limit: int = 40) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
 
-    def _add(token: str) -> None:
+    def _add(token: str, *, is_span: bool = False) -> None:
         token = token.strip()
         if not token:
             return
         # Drop single capitalized stopwords, but keep them inside spans.
         if token in _STOPWORDS:
             return
+        if is_span:
+            # Multi-word span: each word must itself be sane, and the
+            # whole phrase not absurdly long.
+            words = token.split()
+            if not (2 <= len(words) <= 4) or len(token) > 40:
+                return
+            if any(len(w) > 18 for w in words):
+                return
+        else:
+            if not _is_clean_single(token):
+                return
         key = token.lower()
         if key in seen:
             return
@@ -94,7 +138,7 @@ def extract_keywords(text: str, limit: int = 40) -> list[str]:
         phrase = " ".join(w for w in m.split())
         words = phrase.split()
         if words and not all(w in _STOPWORDS for w in words):
-            _add(phrase)
+            _add(phrase, is_span=True)
     for m in _CAP_WORD.findall(text):
         _add(m)
 
@@ -106,7 +150,7 @@ def build_vocab_from_context(
     resume: str = "",
     job_desc: str = "",
     custom: str = "",
-    limit: int = 40,
+    limit: int = 32,
 ) -> list[str]:
     """Combine all four context fields into one keyword list.
 
@@ -127,13 +171,13 @@ def build_initial_prompt(keywords: list[str]) -> str | None:
     Returns None if there's nothing to bias with, so callers can pass
     it straight through to faster-whisper (which treats None as "no
     prompt").
+
+    Kept SHORT on purpose: a long initial_prompt is a well-known trigger
+    for Whisper's repetition/hallucination loops (the 'NET STOP CA USA'
+    garbage). We cap to the first ~18 terms and ~240 chars.
     """
     if not keywords:
         return None
-    # A comma-separated glossary is the documented OpenAI approach for
-    # vocabulary biasing. Keep it compact: Whisper's prompt window is
-    # ~224 tokens, and an over-long prompt can itself hurt accuracy.
-    glossary = ", ".join(keywords)
-    prompt = f"Glossary of terms that may be mentioned: {glossary}."
-    # Hard char cap as a final guard (~200 tokens worth).
-    return prompt[:800]
+    glossary = ", ".join(keywords[:18])
+    prompt = f"Glossary: {glossary}."
+    return prompt[:240]

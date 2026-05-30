@@ -66,8 +66,8 @@ class ContinuousTranscriber:
         engine: STTEngine,
         samplerate: int = 16000,
         min_chunk_seconds: float = 2.5,
-        max_chunk_seconds: float = 20.0,
-        silence_hold_seconds: float = 0.6,
+        max_chunk_seconds: float = 12.0,
+        silence_hold_seconds: float = 0.5,
         silence_rms: float = 0.006,
         poll_interval: float = 0.25,
         max_segments: int = 400,
@@ -282,6 +282,56 @@ class ContinuousTranscriber:
                     f"({(flush_end-done)/self.samplerate:.1f}s): {text[:80]!r}",
                     flush=True,
                 )
+
+    def backlog_seconds(self) -> float:
+        """How many seconds of un-transcribed audio are queued right now.
+        Large backlog => the local model can't keep up with real time and
+        the segments are stale (answering an old question).
+        """
+        with self._lock:
+            return (self.buffer.current_position() - self._done_pos) / self.samplerate
+
+    def transcribe_recent(self, max_seconds: float, engine: "STTEngine | None" = None) -> str:
+        """Transcribe the most-recent ``max_seconds`` of audio DIRECTLY,
+        bypassing the segment backlog, and fast-forward the cursor to now.
+
+        This is the escape hatch for slow machines: when the background
+        loop has fallen behind (backlog > a few seconds), reading the
+        accumulated segments would answer a stale question. Instead we
+        grab the latest audio window, transcribe it once on the calling
+        thread, and reset the cursor so the worker resumes cleanly from
+        the present. The result is "what was just said".
+
+        ``engine`` lets the caller pass a FASTER engine (e.g. Groq cloud
+        STT) for this one synchronous call while the background loop keeps
+        using the local model. If None, the background engine is used.
+        """
+        eng = engine or self.engine
+        now = self.buffer.current_position()
+        # Pull up to max_seconds of the most recent audio.
+        want = int(max(1.0, max_seconds) * self.samplerate)
+        start = max(0, now - want)
+        audio = self.buffer.get_range(start, now)
+        text = ""
+        if audio.size >= self.samplerate * 0.4:
+            try:
+                text = eng.transcribe(audio)
+            except Exception as e:
+                self.last_error = f"{type(e).__name__}: {e}"
+                traceback.print_exc()
+        # Fast-forward: everything up to now is considered consumed, and
+        # we record a synthetic segment so seq advances and future
+        # snapshot_since(seq) calls behave consistently.
+        with self._lock:
+            self._done_pos = now
+            if text:
+                self._seq += 1
+                self._segments.append(
+                    Segment(start=start, end=now, text=text, seq=self._seq)
+                )
+                if len(self._segments) > self.max_segments:
+                    self._segments = self._segments[-self.max_segments:]
+        return text
 
     def set_bias(self, keywords: list[str]) -> None:
         """Forward biasing to the underlying engine."""

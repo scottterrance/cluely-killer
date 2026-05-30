@@ -220,19 +220,49 @@ class Controller(QObject):
         Returns (transcript, source_label, commit) where ``commit`` is a
         zero-arg callable that advances the seq marker - called only on a
         successful answer, mirroring the on-press path's marker advance.
+
+        Backlog guard: if the local model has fallen behind real time
+        (common on slower CPUs with large-v3-turbo), the accumulated
+        segments are STALE - reading them would answer a question from
+        many seconds ago. When the backlog exceeds a small threshold we
+        bypass the queue and transcribe the most-recent window directly
+        on this thread, so the answer reflects what was JUST said.
         """
         t = self.transcriber
-        # Nudge the worker to transcribe the last partial chunk (the
-        # words the interviewer said in the ~2s before the press that
-        # haven't hit a natural pause yet), then read everything since
-        # our last consumed segment.
+        backlog = t.backlog_seconds()
+        # Threshold: a couple of poll cycles + one chunk. Above this the
+        # queue is meaningfully behind the present.
+        if backlog > 6.0:
+            cap = min(self.settings.max_capture_seconds, 30.0)
+            # Prefer a FAST engine for this synchronous press-time call.
+            # If a Groq key is configured, Groq cloud STT (216x realtime)
+            # turns this into a sub-second call instead of blocking on the
+            # slow local model that already fell behind. Falls back to the
+            # local background engine if cloud can't be built.
+            fast = None
+            try:
+                if self.settings.groq_api_key and hasattr(self.whisper, "_get_cloud"):
+                    fast = self.whisper._get_cloud()
+            except Exception:
+                fast = None
+            text = t.transcribe_recent(cap, engine=fast)
+            latest_seq = t.current_seq()
+
+            def commit():
+                self._last_seq = latest_seq
+
+            via = "cloud" if fast is not None else "local"
+            label = f"continuous RECENT via {via} (backlog was {backlog:.0f}s)"
+            return text, label, commit
+
+        # Normal path: nudge the worker to flush the last partial chunk
+        # (words said in the ~2s before the press that haven't hit a
+        # natural pause yet), then read everything since our last marker.
         try:
             t.flush_now(timeout=1.5)
         except Exception:
             pass
         since = -1 if self._last_seq < 0 else self._last_seq
-        # since=-1 means "from the beginning of what's buffered"; the
-        # transcriber treats since_seq=0 as "all segments", so map -1->0.
         text, latest_seq, covered = t.snapshot_since(
             0 if since < 0 else since, self.settings.max_capture_seconds
         )
