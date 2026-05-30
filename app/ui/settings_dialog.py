@@ -119,6 +119,27 @@ class SettingsDialog(QDialog):
         f.addRow("DeepSeek API key:", self.deepseek_key)
         f.addRow("DeepSeek model:", self.deepseek_model)
         f.addRow("DeepSeek base URL:", self.deepseek_base_url)
+
+        # Answer length = THE answer-SPEED lever. LLMs generate tokens
+        # one at a time, so a shorter answer streams faster. On a fast
+        # (GPU) STT setup the LLM is the bottleneck, so 'concise' is the
+        # difference between a ~4s and a ~1.5s answer.
+        self.brevity_combo = QComboBox()
+        for label, val in [
+            ("Concise - 1-2 sentences (FASTEST)", "concise"),
+            ("Normal - 2-3 sentences", "normal"),
+            ("Detailed - 3-5 sentences (slowest)", "detailed"),
+        ]:
+            self.brevity_combo.addItem(label, val)
+        bi = self.brevity_combo.findData(self.settings.answer_brevity)
+        self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 0)
+        f.addRow("Answer length (speed):", self.brevity_combo)
+        f.addRow(QLabel(
+            "<i>Answer length is the main lever for <b>answer speed</b>: the "
+            "model writes one word at a time, so a shorter answer appears "
+            "faster. Pick <b>Concise</b> for the fastest replies.</i>"
+        ))
+
         f.addRow(QLabel(
             "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
             "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
@@ -506,6 +527,7 @@ class SettingsDialog(QDialog):
         s.deepseek_api_key = self.deepseek_key.text().strip()
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
+        s.answer_brevity = self.brevity_combo.currentData() or "concise"
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()

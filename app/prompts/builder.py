@@ -7,10 +7,26 @@ from __future__ import annotations
 
 import random
 
-BASE_INSTRUCTIONS = """You are a real-time interview assistant. The user is the candidate; you generate the candidate's spoken answer to whatever the interviewer just asked.
+# Answer-length directives. LLM generation is sequential (one token at a
+# time), so answer LATENCY is ~proportional to output length. Shorter =
+# faster. This is THE speed lever on a fast-STT setup where the LLM is
+# the bottleneck. 'concise' roughly halves DeepSeek time vs 'detailed'.
+_LENGTH_RULES = {
+    "concise": "- Answer in 1 to 2 SHORT sentences. Brevity is the top priority - it makes the answer appear FAST. Cut every non-essential word.",
+    "normal": "- 2 to 3 sentences. Concise but complete.",
+    "detailed": "- 3 to 5 sentences. Never longer.",
+}
+# max_tokens ceiling per brevity (defense against a runaway answer; the
+# prompt above drives the typical length). Used by the LLM provider.
+LENGTH_MAX_TOKENS = {"concise": 110, "normal": 220, "detailed": 400}
+
+
+def _base_instructions(brevity: str) -> str:
+    length_rule = _LENGTH_RULES.get(brevity, _LENGTH_RULES["concise"])
+    return f"""You are a real-time interview assistant. The user is the candidate; you generate the candidate's spoken answer to whatever the interviewer just asked.
 
 Hard rules - these are non-negotiable:
-- 3 to 5 sentences. Never longer.
+{length_rule}
 - Speak in first person as the candidate ("I", "my").
 - Be confident, natural, conversational. Sound like a smart human, not a textbook or chatbot.
 
@@ -27,6 +43,7 @@ OUTPUT:
 - If the input is unclear or not a question, output the single word: SKIP
 """
 
+
 EXAMPLE_INSTRUCTION = (
     "\n- Include exactly ONE short concrete example, anecdote, or metric (one sentence) "
     "to make the answer memorable. Anchor it to my background where possible."
@@ -39,6 +56,7 @@ def build_system_prompt(
     about: str,
     custom: str,
     include_example: bool,
+    brevity: str = "concise",
 ) -> str:
     # PREFIX-CACHE ORDERING (matters for latency + cost):
     # DeepSeek (and most providers) cache the longest IDENTICAL leading
@@ -47,10 +65,9 @@ def build_system_prompt(
     # So everything that stays CONSTANT within a session goes first:
     #   base rules -> custom -> about-me -> resume -> JD
     # and the only VOLATILE bit (the every-3rd-turn example toggle) goes
-    # LAST. If we injected the example in the middle (as before), it
-    # would change the prefix and bust the cache for the big resume/JD
-    # block on every example turn.
-    parts: list[str] = [BASE_INSTRUCTIONS]
+    # LAST. The base rules vary only with `brevity` (a session-level
+    # setting), so they stay cache-stable within a session.
+    parts: list[str] = [_base_instructions(brevity)]
     if custom and custom.strip():
         parts.append("\nAdditional instructions from the candidate:\n" + custom.strip())
     if about and about.strip():

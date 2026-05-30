@@ -37,6 +37,13 @@ class Settings:
     # want stronger reasoning at the cost of speed.
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
+    # Answer length - THE main lever for answer SPEED when STT is fast
+    # (e.g. on a GPU). LLMs generate tokens sequentially, so answer
+    # latency is ~proportional to output length. Options:
+    #   "concise"  - 1-2 short sentences (~110 token cap). Fastest. Default.
+    #   "normal"   - 2-3 sentences (~220 token cap).
+    #   "detailed" - 3-5 sentences (~400 token cap). Slowest.
+    answer_brevity: str = "concise"
 
     # ---- Speech-to-Text (local faster-whisper, offline) ----
     # 'large-v3-turbo' is a pruned large-v3 (decoder layers 32 -> 4):

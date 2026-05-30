@@ -200,7 +200,7 @@ def main() -> None:
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
-    from .prompts.builder import ExampleScheduler, build_system_prompt
+    from .prompts.builder import LENGTH_MAX_TOKENS, ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
@@ -210,6 +210,8 @@ def main() -> None:
             api_key=s.deepseek_api_key,
             model=s.deepseek_model,
             base_url=s.deepseek_base_url,
+            # Lower max_tokens for shorter brevity = faster answers.
+            max_tokens=LENGTH_MAX_TOKENS.get(s.answer_brevity, 110),
         )
 
     def _prompt_for(s, include_example: bool) -> str:
@@ -219,6 +221,7 @@ def main() -> None:
             about=s.about_me,
             custom=s.custom_system_prompt,
             include_example=include_example,
+            brevity=s.answer_brevity,
         )
 
     scheduler = ExampleScheduler()
