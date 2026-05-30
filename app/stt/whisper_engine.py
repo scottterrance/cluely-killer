@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -267,5 +268,19 @@ class WhisperEngine:
         if self._supports_hotwords and self._hotwords:
             kwargs["hotwords"] = self._hotwords
 
+        # Timing receipt: this is the single most important number for
+        # diagnosing local-STT latency. faster-whisper's transcribe()
+        # returns a generator; the actual compute happens as we iterate
+        # the segments, so we time the FULL drain, not just the call.
+        audio_secs = audio.size / self.samplerate
+        t0 = time.monotonic()
         segments, _info = self.model.transcribe(audio, **kwargs)
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        elapsed = time.monotonic() - t0
+        rtf = (elapsed / audio_secs) if audio_secs > 0 else 0.0
+        print(
+            f"[whisper] transcribed {audio_secs:.1f}s audio in {elapsed:.2f}s "
+            f"on {self.device.upper()} (RTF {rtf:.2f}x; <1.0 = faster than real-time)",
+            flush=True,
+        )
+        return text

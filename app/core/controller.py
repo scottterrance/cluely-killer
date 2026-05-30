@@ -22,6 +22,7 @@ behavior implemented in :class:`RollingAudioBuffer`.
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 from typing import Callable, Literal
 
@@ -278,10 +279,12 @@ class Controller(QObject):
             return text
 
     def _do_answer(self, mode: AnswerMode) -> None:
+        press_t0 = time.monotonic()
         try:
             self.status.emit("Transcribing...")
             commit_marker = None
             stt_label = "?"
+            stt_t0 = time.monotonic()
 
             if self._continuous_active():
                 # Phase 2 fast path: transcript already exists.
@@ -314,9 +317,10 @@ class Controller(QObject):
                 stt_label = "local (on-press)"
 
             self.transcript_ready.emit(transcript)
+            stt_elapsed = time.monotonic() - stt_t0
             print(
                 f"[answer] mode={mode} source={source_label} "
-                f"transcript={transcript[:200]!r}",
+                f"STT-stage={stt_elapsed:.2f}s transcript={transcript[:200]!r}",
                 flush=True,
             )
 
@@ -336,21 +340,33 @@ class Controller(QObject):
             self.answer_started.emit()
             chunks: list[str] = []
             err_msg: str | None = None
+            # Timing receipt for the LLM stage. ttft = time to FIRST token
+            # (network + DeepSeek queue + prefill); total = full answer.
+            llm_t0 = time.monotonic()
+            ttft: float | None = None
             try:
                 for chunk in llm.stream_chat(
                     system_prompt, transcript, prior_messages=prior
                 ):
+                    if ttft is None:
+                        ttft = time.monotonic() - llm_t0
                     chunks.append(chunk)
                     self.answer_chunk.emit(chunk)
             except Exception as e:
                 traceback.print_exc()
                 err_msg = _friendly_error(e)
+            llm_total = time.monotonic() - llm_t0
 
             full = "".join(chunks).strip()
             llm_label = "DeepSeek"
             print(
                 f"[answer] streamed {len(chunks)} chunks, "
                 f"{len(full)} chars, err={err_msg!r}",
+                flush=True,
+            )
+            print(
+                f"[deepseek] TTFT {ttft if ttft is None else round(ttft, 2)}s | "
+                f"full answer {llm_total:.2f}s",
                 flush=True,
             )
 
@@ -382,8 +398,16 @@ class Controller(QObject):
             # this build). fell_back is always False - kept for the
             # overlay badge slot's signature.
             self.backend_used.emit(stt_label, llm_label, False)
+            total_elapsed = time.monotonic() - press_t0
             print(
                 f"[answer] BACKENDS USED -> STT: {stt_label} | LLM: {llm_label}",
+                flush=True,
+            )
+            print(
+                f"[TIMING] press->done {total_elapsed:.2f}s "
+                f"= STT {stt_elapsed:.2f}s + LLM {llm_total:.2f}s "
+                f"(+overhead {max(0.0, total_elapsed - stt_elapsed - llm_total):.2f}s)  "
+                f">>> the bigger number is your bottleneck <<<",
                 flush=True,
             )
 
