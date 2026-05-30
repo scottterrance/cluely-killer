@@ -45,6 +45,23 @@ QWidget#OverlayRoot {
     padding: 0 6px;
 }
 
+#backendBadge {
+    color: #7CC8FF;
+    background-color: rgba(124, 200, 255, 24);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    border: 1px solid rgba(124, 200, 255, 55);
+}
+
+#backendBadge[alarm="true"] {
+    color: #fcd34d;
+    background-color: rgba(251, 191, 36, 36);
+    border: 1px solid rgba(251, 191, 36, 90);
+}
+
 #question {
     color: #9aa3b2;
     font-size: 12px;

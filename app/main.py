@@ -50,8 +50,8 @@ def main() -> None:
     if simple_mode:
         _say("--simple: using a normal titled window.")
 
-    # DeepSeek key from .env if present (only loaded if user hasn't
-    # already entered one in Settings).
+    # DeepSeek key + overrides from .env if present (only loaded if the
+    # user hasn't already entered one in Settings).
     ds_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if ds_key and not settings.deepseek_api_key:
         settings.deepseek_api_key = ds_key
@@ -72,7 +72,8 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     class HotkeyDispatcher(QObject):
-        answer_requested = pyqtSignal()
+        answer_short_requested = pyqtSignal()
+        answer_context_requested = pyqtSignal()
         toggle_requested = pyqtSignal()
         clear_requested = pyqtSignal()
         settings_requested = pyqtSignal()
@@ -100,25 +101,97 @@ def main() -> None:
     from .audio.buffer import RollingAudioBuffer
     from .audio.loopback import LoopbackCapture
 
-    buffer = RollingAudioBuffer(samplerate=16000, max_seconds=settings.buffer_seconds)
+    buffer = RollingAudioBuffer(
+        samplerate=16000,
+        # The rolling buffer must be at least max_capture_seconds long,
+        # otherwise audio that arrives between two answer presses could
+        # be evicted before the next press reads it. config.py already
+        # migrates persisted values, but enforce it here too as a
+        # belt-and-braces guard for in-memory edits.
+        max_seconds=max(
+            settings.buffer_seconds,
+            settings.max_capture_seconds + 5,
+        ),
+    )
     capture = LoopbackCapture(buffer, samplerate=16000)
     capture.start()
     _say("audio capture started.")
 
-    # ---- STT (bundled 'small' model, offline) ----
+    # ---- STT (local faster-whisper, offline) ----
     _say(
-        f"loading faster-whisper '{settings.whisper_model}' "
-        f"({settings.whisper_compute} on {settings.whisper_device}) "
-        f"from bundled cache..."
+        f"loading local Whisper '{settings.whisper_model}' "
+        f"(device={settings.whisper_device}, compute={settings.whisper_compute})..."
     )
     from .stt.whisper_engine import WhisperEngine
 
-    whisper = WhisperEngine(
-        model_size=settings.whisper_model,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute,
-    )
-    _say("Whisper model loaded.")
+    try:
+        whisper = WhisperEngine(
+            model_size=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute,
+            allow_auto_download=settings.whisper_allow_auto_download,
+            cpu_threads=settings.whisper_cpu_threads,
+        )
+        _say(
+            f"Whisper loaded on {whisper.device.upper()} "
+            f"(compute={whisper.compute_type})."
+            + ("  >>> GPU ACTIVE <<<" if whisper.device == "cuda"
+               else "  (CPU - set Audio/STT device to GPU, or install CUDA, for ~1s answers)")
+        )
+    except Exception as e:
+        # Without the local model the app can't transcribe at all. Surface
+        # a clear message; the overlay will still open so the user can read
+        # the error and fix the model path.
+        _say(f"FATAL: could not load local Whisper model: {e}")
+        raise
+
+    # ---- Continuous background transcription ----
+    # A daemon thread transcribes the audio buffer as the interviewer
+    # talks (local model). On a hotkey press the answer reads this
+    # pre-built transcript, so Whisper is off the press critical path.
+    transcriber = None
+    if settings.continuous_stt:
+        try:
+            from .stt.continuous import ContinuousTranscriber
+
+            transcriber = ContinuousTranscriber(
+                buffer=buffer, engine=whisper, samplerate=16000
+            )
+            transcriber.start()
+            _say("continuous STT ON (background transcription).")
+        except Exception as e:
+            settings.continuous_stt = False
+            _say(
+                f"continuous STT unavailable ({e}); using transcribe-on-press."
+            )
+    else:
+        _say("continuous STT OFF (transcribe-on-press path).")
+
+    # Bias Whisper toward the candidate's own vocabulary (names, tech,
+    # company terms) extracted from resume / JD / about-me. Big accuracy
+    # win on exactly the words interviews get wrong.
+    from .stt.biasing import build_vocab_from_context
+
+    def _refresh_whisper_bias() -> None:
+        if not settings.stt_bias_enabled:
+            whisper.set_bias([])
+            if transcriber is not None:
+                transcriber.set_bias([])
+            _say("STT keyword biasing DISABLED (stt_bias_enabled=False).")
+            return
+        vocab = build_vocab_from_context(
+            about=settings.about_me,
+            resume=settings.resume_text,
+            job_desc=settings.job_description,
+            custom=settings.custom_system_prompt,
+        )
+        whisper.set_bias(vocab)
+        # Keep the background transcriber's engine biased too (it holds
+        # its own reference to the local engine).
+        if transcriber is not None:
+            transcriber.set_bias(vocab)
+
+    _refresh_whisper_bias()
 
     # ---- Orchestration ----
     _say("wiring controller, prompts, providers...")
@@ -127,7 +200,7 @@ def main() -> None:
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
-    from .prompts.builder import ExampleScheduler, build_system_prompt
+    from .prompts.builder import LENGTH_MAX_TOKENS, ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
@@ -137,6 +210,8 @@ def main() -> None:
             api_key=s.deepseek_api_key,
             model=s.deepseek_model,
             base_url=s.deepseek_base_url,
+            # Lower max_tokens for shorter brevity = faster answers.
+            max_tokens=LENGTH_MAX_TOKENS.get(s.answer_brevity, 110),
         )
 
     def _prompt_for(s, include_example: bool) -> str:
@@ -146,6 +221,7 @@ def main() -> None:
             about=s.about_me,
             custom=s.custom_system_prompt,
             include_example=include_example,
+            brevity=s.answer_brevity,
         )
 
     scheduler = ExampleScheduler()
@@ -158,6 +234,7 @@ def main() -> None:
         scheduler=scheduler,
         prompt_builder=_prompt_for,
         history=history,
+        transcriber=transcriber,
     )
     _say("controller ready (memory keeps last 5 Q+A turns).")
 
@@ -177,6 +254,13 @@ def main() -> None:
             overlay.update_stealth_badge(settings.exclude_from_capture and ok)
             overlay.refresh_footer()
             apply_hotkeys()
+            # Resume / JD / about-me may have changed -> rebuild the
+            # Whisper biasing vocabulary so STT accuracy tracks the new
+            # context immediately (no restart needed).
+            _refresh_whisper_bias()
+            # Apply a live toggle of continuous transcription (start/stop
+            # the background thread to match the new checkbox state).
+            controller.apply_continuous_setting()
 
     overlay = OverlayWindow(
         settings,
@@ -208,7 +292,15 @@ def main() -> None:
     # ---- Hotkeys (with cross-thread marshalling) ----
     dispatcher = HotkeyDispatcher()
     qc = Qt.ConnectionType.QueuedConnection
-    dispatcher.answer_requested.connect(controller.trigger_answer, qc)
+    # Two answer keys: short = no history, context = last 5 Q+A as memory.
+    # The lambdas wrap controller.trigger_answer so it can be invoked with
+    # the right mode argument from the queued-connection slot.
+    dispatcher.answer_short_requested.connect(
+        lambda: controller.trigger_answer("short"), qc
+    )
+    dispatcher.answer_context_requested.connect(
+        lambda: controller.trigger_answer("context"), qc
+    )
     dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
     dispatcher.clear_requested.connect(controller.clear, qc)
     dispatcher.settings_requested.connect(open_settings_dialog, qc)
@@ -216,7 +308,8 @@ def main() -> None:
 
     def apply_hotkeys() -> None:
         hotkeys.set_hotkeys({
-            settings.hotkey_answer: dispatcher.answer_requested.emit,
+            settings.hotkey_answer_short: dispatcher.answer_short_requested.emit,
+            settings.hotkey_answer_context: dispatcher.answer_context_requested.emit,
             settings.hotkey_toggle: dispatcher.toggle_requested.emit,
             settings.hotkey_clear: dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,
@@ -269,6 +362,8 @@ def main() -> None:
     def cleanup() -> None:
         hotkeys.stop()
         capture.stop()
+        if transcriber is not None:
+            transcriber.stop()
 
     app.aboutToQuit.connect(cleanup)
 

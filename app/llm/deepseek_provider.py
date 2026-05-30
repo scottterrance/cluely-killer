@@ -37,6 +37,7 @@ class DeepSeekProvider(LLMProvider):
         api_key: str,
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
+        max_tokens: int = 400,
     ):
         if not api_key:
             raise ValueError(
@@ -47,6 +48,11 @@ class DeepSeekProvider(LLMProvider):
         self.api_key = api_key
         self.model = (model or DEFAULT_MODEL).strip()
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        # Output-token ceiling. LLM latency is ~proportional to tokens
+        # generated, so a lower cap directly lowers answer time. The
+        # prompt's brevity rule drives typical length; this is the hard
+        # backstop against a runaway answer.
+        self.max_tokens = int(max_tokens) if max_tokens else 400
 
     def stream_chat(
         self,
@@ -68,7 +74,7 @@ class DeepSeekProvider(LLMProvider):
             "messages": msgs,
             "stream": True,
             "temperature": 0.6,
-            "max_tokens": 400,
+            "max_tokens": self.max_tokens,
             "top_p": 0.95,
         }
 

@@ -151,6 +151,16 @@ class OverlayWindow(QWidget):
         self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
         header.addWidget(self.mem_label)
 
+        # Ground-truth engine badge: shows which STT path + LLM produced
+        # the last answer (local continuous / local on-press, + DeepSeek).
+        self.backend_label = QLabel("engine: -")
+        self.backend_label.setObjectName("backendBadge")
+        self.backend_label.setProperty("alarm", "false")
+        self.backend_label.setToolTip(
+            "Which engines produced the last answer. Updates after every press."
+        )
+        header.addWidget(self.backend_label)
+
         header.addStretch()
 
         self.stealth_label = QLabel("STEALTH")
@@ -183,7 +193,10 @@ class OverlayWindow(QWidget):
         v.addLayout(header)
 
         # --- Question / transcript ---
-        self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
+        self.question_label = QLabel(
+            "Press '1' for a quick answer to the last thing said, "
+            "or '2' to also use the last 5 Q+A as context."
+        )
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
         self.question_label.setMaximumHeight(60)
@@ -205,7 +218,8 @@ class OverlayWindow(QWidget):
 
     def _footer_text(self) -> str:
         return (
-            f"{self.settings.hotkey_answer} answer  \u00b7  "
+            f"{self.settings.hotkey_answer_short} answer-only  \u00b7  "
+            f"{self.settings.hotkey_answer_context} answer+context  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
             f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
             f"{self.settings.hotkey_settings} settings"
@@ -242,6 +256,7 @@ class OverlayWindow(QWidget):
         c.error.connect(self._on_error)
         c.status.connect(self._on_status)
         c.history_changed.connect(self._on_history_changed)
+        c.backend_used.connect(self._on_backend_used)
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
@@ -277,6 +292,17 @@ class OverlayWindow(QWidget):
     @pyqtSlot(int)
     def _on_history_changed(self, n: int) -> None:
         self.mem_label.setText(f"mem {n}")
+
+    @pyqtSlot(str, str, bool)
+    def _on_backend_used(self, stt_label: str, llm_label: str, fell_back: bool) -> None:
+        # Compact ground-truth readout, e.g. "local (continuous) | DeepSeek".
+        self.backend_label.setText(f"{stt_label}  |  {llm_label}")
+        self.backend_label.setToolTip(
+            f"Engines for the last answer:\n  STT: {stt_label}\n  LLM: {llm_label}"
+        )
+        self.backend_label.setProperty("alarm", "true" if fell_back else "false")
+        self.backend_label.style().unpolish(self.backend_label)
+        self.backend_label.style().polish(self.backend_label)
 
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)
