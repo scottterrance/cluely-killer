@@ -72,12 +72,60 @@ def _default_cpu_threads() -> int:
     return max(2, n - 1)
 
 
+def _cuda_available() -> bool:
+    """Best-effort check for a usable CUDA GPU for CTranslate2.
+
+    CTranslate2 ships its own CUDA runtime detection. We ask it directly
+    so we don't depend on torch/nvidia-smi being importable. Any failure
+    (no CUDA build, no driver, no device) returns False so we fall back
+    to CPU cleanly.
+    """
+    try:
+        import ctranslate2  # noqa
+
+        count = ctranslate2.get_cuda_device_count()
+        return int(count) > 0
+    except Exception as e:
+        print(f"[whisper] CUDA check: not available ({e})", flush=True)
+        return False
+
+
+def _resolve_device_and_compute(device: str, compute_type: str) -> tuple[str, str]:
+    """Map the user's device/compute settings to concrete CTranslate2 args.
+
+    device:
+      "auto" -> "cuda" if a CUDA GPU is detected, else "cpu"
+      "cuda"/"gpu" -> force CUDA (will error at model-build if unavailable;
+                      caller handles the fallback)
+      "cpu" -> force CPU
+
+    compute_type:
+      "auto" -> "float16" on GPU (fast + accurate on tensor cores),
+                "int8" on CPU (fast + small)
+      anything else -> used verbatim (e.g. "int8_float16", "float32")
+    """
+    dev = (device or "auto").strip().lower()
+    if dev in ("gpu", "cuda"):
+        resolved_dev = "cuda"
+    elif dev == "cpu":
+        resolved_dev = "cpu"
+    else:  # auto
+        resolved_dev = "cuda" if _cuda_available() else "cpu"
+
+    comp = (compute_type or "auto").strip().lower()
+    if comp == "auto":
+        resolved_comp = "float16" if resolved_dev == "cuda" else "int8"
+    else:
+        resolved_comp = comp
+    return resolved_dev, resolved_comp
+
+
 class WhisperEngine:
     def __init__(
         self,
         model_size: str = "large-v3-turbo",
-        device: str = "cpu",
-        compute_type: str = "int8",
+        device: str = "auto",
+        compute_type: str = "auto",
         allow_auto_download: bool = False,
         cpu_threads: int = 0,
     ):
@@ -120,12 +168,47 @@ class WhisperEngine:
             )
 
         threads = cpu_threads if cpu_threads and cpu_threads > 0 else _default_cpu_threads()
-        print(f"[whisper] using cpu_threads={threads} (device={device}, compute={compute_type})", flush=True)
-        self.model = WhisperModel(
-            target,
-            device=device,
-            compute_type=compute_type,
-            cpu_threads=threads,
+        resolved_dev, resolved_comp = _resolve_device_and_compute(device, compute_type)
+
+        # Build the model. On GPU (cuda) cpu_threads is irrelevant. If a
+        # GPU build fails for ANY reason (missing CUDA/cuDNN DLLs, OOM,
+        # driver mismatch), fall back to CPU/int8 so the app still works
+        # instead of crashing - the user just doesn't get the speedup.
+        def _build(dev: str, comp: str) -> "WhisperModel":
+            print(
+                f"[whisper] building model on device={dev} compute={comp}"
+                + (f" cpu_threads={threads}" if dev == "cpu" else ""),
+                flush=True,
+            )
+            kwargs = dict(device=dev, compute_type=comp)
+            if dev == "cpu":
+                kwargs["cpu_threads"] = threads
+            return WhisperModel(target, **kwargs)
+
+        try:
+            self.model = _build(resolved_dev, resolved_comp)
+            self.device = resolved_dev
+            self.compute_type = resolved_comp
+        except Exception as e:
+            if resolved_dev == "cuda":
+                print(
+                    f"[whisper] GPU init failed ({type(e).__name__}: {e}); "
+                    f"falling back to CPU/int8. For GPU you need the NVIDIA "
+                    f"CUDA + cuDNN runtime DLLs on PATH (see the GPU setup note).",
+                    flush=True,
+                )
+                self.model = _build("cpu", "int8")
+                self.device = "cpu"
+                self.compute_type = "int8"
+            else:
+                raise
+
+        print(
+            f"[whisper] READY on {self.device.upper()} "
+            f"(compute={self.compute_type}). "
+            + ("GPU active - expect sub-second transcription." if self.device == "cuda"
+               else "CPU mode - transcription speed scales with audio length."),
+            flush=True,
         )
 
         # faster-whisper >= 1.0 added a `hotwords` kwarg to transcribe();

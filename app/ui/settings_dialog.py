@@ -366,13 +366,38 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
-        # The local Whisper model bundled next to the .exe (offline).
-        self.whisper_model_label = QLabel(
-            f"<code>{self.settings.whisper_model}</code> (bundled local model, offline)"
-        )
+        # Model selector. large-v3-turbo = best accuracy; small/base =
+        # much faster on CPU (3-4x) at some accuracy cost. Each requires
+        # the matching model folder bundled next to the .exe
+        # (models/whisper-<name>/). Changing this needs a restart.
+        self.model_combo = QComboBox()
+        for label, val in [
+            ("large-v3-turbo (best accuracy)", "large-v3-turbo"),
+            ("small (3-4x faster on CPU)", "small"),
+            ("base (fastest on CPU)", "base"),
+        ]:
+            self.model_combo.addItem(label, val)
+        mi = self.model_combo.findData(self.settings.whisper_model)
+        if mi < 0:
+            # Unknown/custom model name - add it so it's not lost.
+            self.model_combo.addItem(f"{self.settings.whisper_model} (custom)", self.settings.whisper_model)
+            mi = self.model_combo.count() - 1
+        self.model_combo.setCurrentIndex(mi)
 
-        # CTranslate2 worker threads. Higher = faster local STT on a
-        # multi-core CPU. 0 = auto (all cores minus one).
+        # Device selector. Auto = GPU if present else CPU. This is THE
+        # speed lever: GPU transcribes large-v3-turbo in well under 1s.
+        self.device_combo = QComboBox()
+        for label, val in [
+            ("Auto (GPU if available, else CPU)", "auto"),
+            ("GPU (CUDA)", "cuda"),
+            ("CPU", "cpu"),
+        ]:
+            self.device_combo.addItem(label, val)
+        di = self.device_combo.findData(self.settings.whisper_device)
+        self.device_combo.setCurrentIndex(di if di >= 0 else 0)
+
+        # CTranslate2 worker threads (CPU mode only). Higher = faster
+        # local STT on a multi-core CPU. 0 = auto (all cores minus one).
         import os as _os
         self.cpu_threads_spin = QDoubleSpinBox()
         self.cpu_threads_spin.setDecimals(0)
@@ -409,21 +434,25 @@ class SettingsDialog(QDialog):
         )
         self.bias_check.setChecked(self.settings.stt_bias_enabled)
 
-        f.addRow("Local Whisper model:", self.whisper_model_label)
+        f.addRow("Whisper model:", self.model_combo)
+        f.addRow("Device:", self.device_combo)
         f.addRow("CPU threads (0 = auto):", self.cpu_threads_spin)
         f.addRow("First-press window (sec):", self.window_spin)
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(self.continuous_check)
         f.addRow(self.bias_check)
         f.addRow(QLabel(
-            "<i><b>Continuous transcription</b> runs the local Whisper model "
-            "in the background as the interviewer talks, so pressing '1'/'2' "
-            "only waits for the AI answer - not for transcription.<br><br>"
+            "<i><b>Device = GPU</b> is the big speed win: it transcribes "
+            "large-v3-turbo in well under a second. Needs an NVIDIA GPU + the "
+            "CUDA/cuDNN runtime DLLs. If GPU init fails, the app falls back to "
+            "CPU automatically.<br><br>"
+            "<b>No GPU?</b> Switch <b>Whisper model</b> to <b>small</b> or "
+            "<b>base</b> - 3-4x faster than turbo on CPU.<br><br>"
+            "<b>Changing model or device requires an app restart.</b> Other "
+            "options apply immediately.<br><br>"
             "On each press, only the interviewer's <b>last question</b> is "
-            "transcribed (not the whole window), which is the main local-STT "
-            "speedup. Raise <b>CPU threads</b> if you have spare cores.<br><br>"
-            "Each press of '1' or '2' covers everything said since the previous "
-            "press, capped at <b>Max capture</b>.</i>"
+            "transcribed (not the whole window). Each press of '1' or '2' covers "
+            "everything said since the previous press, capped at <b>Max capture</b>.</i>"
         ))
         return w
 
@@ -483,6 +512,8 @@ class SettingsDialog(QDialog):
         s.job_description = self.job_edit.toPlainText()
         s.custom_system_prompt = self.custom_edit.toPlainText()
 
+        s.whisper_model = self.model_combo.currentData() or "large-v3-turbo"
+        s.whisper_device = self.device_combo.currentData() or "auto"
         s.whisper_cpu_threads = int(self.cpu_threads_spin.value())
         s.answer_window_seconds = float(self.window_spin.value())
         s.max_capture_seconds = float(self.max_capture_spin.value())

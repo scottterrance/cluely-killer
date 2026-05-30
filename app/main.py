@@ -120,7 +120,7 @@ def main() -> None:
     # ---- STT (local faster-whisper, offline) ----
     _say(
         f"loading local Whisper '{settings.whisper_model}' "
-        f"({settings.whisper_compute} on {settings.whisper_device})..."
+        f"(device={settings.whisper_device}, compute={settings.whisper_compute})..."
     )
     from .stt.whisper_engine import WhisperEngine
 
@@ -132,7 +132,12 @@ def main() -> None:
             allow_auto_download=settings.whisper_allow_auto_download,
             cpu_threads=settings.whisper_cpu_threads,
         )
-        _say("Whisper model loaded.")
+        _say(
+            f"Whisper loaded on {whisper.device.upper()} "
+            f"(compute={whisper.compute_type})."
+            + ("  >>> GPU ACTIVE <<<" if whisper.device == "cuda"
+               else "  (CPU - set Audio/STT device to GPU, or install CUDA, for ~1s answers)")
+        )
     except Exception as e:
         # Without the local model the app can't transcribe at all. Surface
         # a clear message; the overlay will still open so the user can read

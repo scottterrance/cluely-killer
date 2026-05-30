@@ -45,8 +45,13 @@ class Settings:
     # models/whisper-large-v3-turbo/), so the end user never sees a
     # download. ~1.5 GB on disk at int8.
     whisper_model: str = "large-v3-turbo"
-    whisper_compute: str = "int8"
-    whisper_device: str = "cpu"
+    # Device: "auto" picks CUDA GPU if detected, else CPU. Force with
+    # "cuda"/"gpu" or "cpu". GPU makes large-v3-turbo transcribe in
+    # well under a second; CPU latency scales with audio length.
+    whisper_device: str = "auto"
+    # Compute type: "auto" -> float16 on GPU, int8 on CPU. Override with
+    # an explicit CTranslate2 type (e.g. int8_float16, float32) if needed.
+    whisper_compute: str = "auto"
     # CTranslate2 worker threads. 0 = auto (all cores minus one). Raising
     # this is the simplest local-STT speedup on a multi-core CPU.
     whisper_cpu_threads: int = 0
@@ -160,6 +165,18 @@ def load_settings() -> Settings:
             if s.whisper_model == "small":
                 s.whisper_model = "large-v3-turbo"
                 print("[config] migrated whisper_model 'small' -> 'large-v3-turbo'")
+            # One-time device/compute upgrade: older builds hard-defaulted
+            # to CPU/int8. Migrate those to 'auto' so the app now picks a
+            # CUDA GPU automatically when present (and still uses CPU when
+            # not). This is safe - 'auto' falls back to CPU/int8 if there's
+            # no GPU. Anyone who explicitly set 'cuda' or a custom compute
+            # type keeps it.
+            if s.whisper_device == "cpu":
+                s.whisper_device = "auto"
+                print("[config] migrated whisper_device 'cpu' -> 'auto' (GPU auto-detect)")
+            if s.whisper_compute == "int8":
+                s.whisper_compute = "auto"
+                print("[config] migrated whisper_compute 'int8' -> 'auto'")
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")
