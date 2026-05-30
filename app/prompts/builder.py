@@ -40,9 +40,17 @@ def build_system_prompt(
     custom: str,
     include_example: bool,
 ) -> str:
+    # PREFIX-CACHE ORDERING (matters for latency + cost):
+    # DeepSeek (and most providers) cache the longest IDENTICAL leading
+    # span of the prompt across requests and skip recomputing it - a
+    # cache hit cuts time-to-first-token and is billed ~10x cheaper.
+    # So everything that stays CONSTANT within a session goes first:
+    #   base rules -> custom -> about-me -> resume -> JD
+    # and the only VOLATILE bit (the every-3rd-turn example toggle) goes
+    # LAST. If we injected the example in the middle (as before), it
+    # would change the prefix and bust the cache for the big resume/JD
+    # block on every example turn.
     parts: list[str] = [BASE_INSTRUCTIONS]
-    if include_example:
-        parts.append(EXAMPLE_INSTRUCTION)
     if custom and custom.strip():
         parts.append("\nAdditional instructions from the candidate:\n" + custom.strip())
     if about and about.strip():
@@ -51,6 +59,9 @@ def build_system_prompt(
         parts.append("\n--- My resume ---\n" + resume.strip())
     if job_desc and job_desc.strip():
         parts.append("\n--- Target job ---\n" + job_desc.strip())
+    # Volatile tail - keep this the ONLY thing that varies turn-to-turn.
+    if include_example:
+        parts.append(EXAMPLE_INSTRUCTION)
     return "\n".join(parts)
 
 

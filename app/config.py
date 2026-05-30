@@ -33,12 +33,22 @@ class Settings:
     deepseek_base_url: str = "https://api.deepseek.com/v1"
 
     # ---- Speech-to-Text (faster-whisper) ----
-    # Locked to 'small' - the model files are bundled next to the .exe
-    # so the friend never sees a download. ~466 MB on disk, ~3-5s
-    # transcription per 25-second clip on a typical CPU at int8.
-    whisper_model: str = "small"
+    # 'large-v3-turbo' is a pruned large-v3 (decoder layers 32 -> 4):
+    # markedly more accurate than 'small' - especially on names and
+    # technical jargon - while staying fast enough for interview-length
+    # clips at int8 on CPU. Model files are bundled next to the .exe
+    # (in models/whisper-large-v3-turbo/), so the end user never sees a
+    # download. ~1.6 GB on disk at int8.
+    whisper_model: str = "large-v3-turbo"
     whisper_compute: str = "int8"
     whisper_device: str = "cpu"
+    # SAFETY: when False (the default, and what every .exe ships with),
+    # WhisperEngine refuses to download a missing model at runtime and
+    # raises a clear "place the files here" error instead. Set True only
+    # on a dev machine if you want faster-whisper to fetch the model from
+    # HuggingFace once. An end user can NEVER trigger a mid-interview
+    # multi-GB download.
+    whisper_allow_auto_download: bool = False
 
     # ---- Audio ----
     # Fallback window for the FIRST press in a session, when no
@@ -116,14 +126,15 @@ def load_settings() -> Settings:
             # default of 60 s get bumped to the new 130 s default
             # automatically. Anyone who hand-tuned a higher value
             # keeps their value.
-            if s.buffer_seconds < s.max_capture_seconds + 5:
-                old = s.buffer_seconds
-                s.buffer_seconds = s.max_capture_seconds + 10
-                print(
-                    f"[config] migrated buffer_seconds {old} -> "
-                    f"{s.buffer_seconds} (must exceed max_capture_seconds "
-                    f"{s.max_capture_seconds})"
-                )
+            # One-time STT upgrade: bump anyone still on the old bundled
+            # 'small' default to 'large-v3-turbo'. Requires the turbo
+            # model folder to be present next to the .exe (rebuild with
+            # the new model staged - see setup-model.ps1). If you have a
+            # reason to stay on 'small', set whisper_model in config.json
+            # to something other than these two and it won't be touched.
+            if s.whisper_model == "small":
+                s.whisper_model = "large-v3-turbo"
+                print("[config] migrated whisper_model 'small' -> 'large-v3-turbo'")
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")

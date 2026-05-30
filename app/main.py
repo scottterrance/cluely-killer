@@ -129,8 +129,25 @@ def main() -> None:
         model_size=settings.whisper_model,
         device=settings.whisper_device,
         compute_type=settings.whisper_compute,
+        allow_auto_download=settings.whisper_allow_auto_download,
     )
     _say("Whisper model loaded.")
+
+    # Bias Whisper toward the candidate's own vocabulary (names, tech,
+    # company terms) extracted from resume / JD / about-me. Big accuracy
+    # win on exactly the words interviews get wrong.
+    from .stt.biasing import build_vocab_from_context
+
+    def _refresh_whisper_bias() -> None:
+        vocab = build_vocab_from_context(
+            about=settings.about_me,
+            resume=settings.resume_text,
+            job_desc=settings.job_description,
+            custom=settings.custom_system_prompt,
+        )
+        whisper.set_bias(vocab)
+
+    _refresh_whisper_bias()
 
     # ---- Orchestration ----
     _say("wiring controller, prompts, providers...")
@@ -189,6 +206,10 @@ def main() -> None:
             overlay.update_stealth_badge(settings.exclude_from_capture and ok)
             overlay.refresh_footer()
             apply_hotkeys()
+            # Resume / JD / about-me may have changed -> rebuild the
+            # Whisper biasing vocabulary so STT accuracy tracks the new
+            # context immediately (no restart needed).
+            _refresh_whisper_bias()
 
     overlay = OverlayWindow(
         settings,
