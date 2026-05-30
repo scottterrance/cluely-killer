@@ -420,16 +420,27 @@ class SettingsDialog(QDialog):
         self.max_capture_spin.setSingleStep(5.0)
         self.max_capture_spin.setValue(self.settings.max_capture_seconds)
 
+        # Continuous STT toggle (Phase 2). When on, a background thread
+        # transcribes as the interviewer talks so the press path is just
+        # the LLM call. Uses the LOCAL model only - costs no cloud quota.
+        self.continuous_check = QCheckBox(
+            "Continuous transcription (background, near-instant answers)"
+        )
+        self.continuous_check.setChecked(self.settings.continuous_stt)
+
         f.addRow("Local Whisper model:", self.whisper_model_label)
         f.addRow("First-press window (sec):", self.window_spin)
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
+        f.addRow(self.continuous_check)
         f.addRow(QLabel(
-            "<i>Choose <b>Cloud turbo</b> vs <b>Local turbo</b> on the "
-            "<b>AI Provider</b> tab. Cloud is faster on most machines and "
-            "uses your Groq quota; Local runs offline on your CPU.<br><br>"
-            "Each press of '1' or '2' transcribes everything the "
-            "interviewer said since the previous press, capped at "
-            "<b>Max capture</b>. Press more often = tighter transcripts.</i>"
+            "<i><b>Continuous transcription</b> runs the <b>local</b> Whisper "
+            "model in the background as the interviewer talks, so pressing "
+            "'1'/'2' only waits for the AI answer - not for transcription. "
+            "It uses your CPU but <b>no extra cloud quota</b>, and needs the "
+            "local model present. Turn it off to transcribe only on press "
+            "using the STT backend chosen on the AI Provider tab.<br><br>"
+            "Each press of '1' or '2' covers everything the interviewer said "
+            "since the previous press, capped at <b>Max capture</b>.</i>"
         ))
         return w
 
@@ -502,6 +513,7 @@ class SettingsDialog(QDialog):
         # anyone overwrite it from the UI.
         s.answer_window_seconds = float(self.window_spin.value())
         s.max_capture_seconds = float(self.max_capture_spin.value())
+        s.continuous_stt = self.continuous_check.isChecked()
         # buffer_seconds must always exceed max_capture_seconds. Bump
         # it here so the Audio tab can't get persisted into a state
         # where the next app start would silently drop audio.

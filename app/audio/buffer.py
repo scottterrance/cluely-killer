@@ -65,6 +65,34 @@ class RollingAudioBuffer:
         with self._lock:
             return self._total_appended
 
+    def get_range(self, start: int, end: int) -> np.ndarray:
+        """Return audio for the absolute sample interval [start, end).
+
+        Both bounds are on the same monotonic timeline as
+        ``current_position()`` / ``_total_appended``. The interval is
+        clipped to whatever is still resident in the rolling window:
+        the buffer currently holds samples
+        ``[_total_appended - _buf.size, _total_appended)``, so any part
+        of [start, end) older than that has already been evicted and
+        simply isn't returned.
+
+        Used by the continuous transcriber, which walks forward through
+        the timeline one chunk at a time and asks for each chunk by its
+        absolute [start, end) bounds.
+        """
+        with self._lock:
+            if end <= start or self._buf.size == 0:
+                return np.zeros(0, dtype=np.float32)
+            buf_start = self._total_appended - self._buf.size
+            # Clip the requested interval to what's resident.
+            lo = max(start, buf_start)
+            hi = min(end, self._total_appended)
+            if hi <= lo:
+                return np.zeros(0, dtype=np.float32)
+            i = lo - buf_start
+            j = hi - buf_start
+            return self._buf[i:j].copy()
+
     def get_since_position(
         self, position: int, max_seconds: float
     ) -> np.ndarray:

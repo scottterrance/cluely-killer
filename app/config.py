@@ -94,6 +94,17 @@ class Settings:
     # next press could read it. main.py enforces this at startup.
     buffer_seconds: float = 130.0
 
+    # ---- Continuous STT (Phase 2) ----
+    # When True, a background thread transcribes the audio buffer as the
+    # interviewer talks (using the LOCAL whisper model only - never the
+    # metered cloud STT). On a hotkey press the answer reads the
+    # already-built transcript, so Whisper is no longer on the press
+    # critical path and the perceived latency drops to ~the LLM call.
+    # When False, the app uses the classic transcribe-on-press path
+    # (whatever stt_backend is selected). Auto-disabled at runtime if
+    # the local model isn't available.
+    continuous_stt: bool = True
+
     # ---- Hotkeys (pynput-style GlobalHotKeys syntax) ----
     # Two answer modes:
     #   - SHORT: answer ONLY about whatever the interviewer said since
@@ -162,21 +173,16 @@ def load_settings() -> Settings:
             if s.whisper_model == "small":
                 s.whisper_model = "large-v3-turbo"
                 print("[config] migrated whisper_model 'small' -> 'large-v3-turbo'")
-            # Backend migration for configs written before Groq support
-            # existed. Heuristic: if the user has no Groq key but DOES
-            # have a DeepSeek key, they're an existing DeepSeek user -
-            # keep them on DeepSeek + local STT so nothing breaks on
-            # upgrade. A fresh install (no keys) keeps the new
-            # groq/cloud defaults so the first-run experience points at
-            # the fast path. Once a Groq key is entered in Settings the
-            # user can flip the backends explicitly.
-            if not s.groq_api_key and s.deepseek_api_key:
-                if s.llm_backend == "groq":
-                    s.llm_backend = "deepseek"
-                    print("[config] no Groq key + DeepSeek key present -> llm_backend='deepseek'")
-                if s.stt_backend == "cloud":
-                    s.stt_backend = "local"
-                    print("[config] no Groq key -> stt_backend='local'")
+            # NOTE: we intentionally do NOT auto-downgrade the backend
+            # here based on which API keys are present. An earlier
+            # version moved key-less configs to deepseek/local, but that
+            # mis-fired for users whose Groq key comes from .env (which
+            # is applied in main.py AFTER this function runs) - they were
+            # silently forced onto DeepSeek/local despite having a valid
+            # Groq key. The LLM/STT routers already fall back to the
+            # other backend at call time if the selected one errors, so
+            # honoring the user's explicit selection here is both correct
+            # and safe.
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")

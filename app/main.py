@@ -138,12 +138,43 @@ def main() -> None:
     # Eagerly build the primary backend so model-load / key errors show
     # up at startup (and the local model warms up) rather than on the
     # first hotkey press. Failure here is non-fatal: the router will try
-    # the other backend on first use.
-    try:
-        whisper._engine(whisper._order()[0])
-        _say(f"STT primary backend '{whisper._order()[0]}' ready.")
-    except Exception as e:
-        _say(f"STT primary backend not ready ({e}); will use fallback on first press.")
+    # the other backend on first use. We warm the first backend that can
+    # actually be built so a cloud-primary user with no local model (or
+    # vice-versa) still gets a warm engine.
+    for _b in whisper._order():
+        try:
+            whisper._engine(_b)
+            _say(f"STT backend '{_b}' ready (primary warm).")
+            break
+        except Exception as e:
+            _say(f"STT backend '{_b}' not ready ({e}); trying next...")
+
+    # ---- Continuous background transcription (Phase 2) ----
+    # A daemon thread transcribes the audio buffer as the interviewer
+    # talks, using the LOCAL whisper model ONLY (never the metered cloud
+    # STT). On a hotkey press the answer reads this pre-built transcript,
+    # so Whisper is off the press critical path. If the local model
+    # isn't available we disable continuous mode and fall back to the
+    # classic transcribe-on-press path.
+    transcriber = None
+    if settings.continuous_stt:
+        try:
+            local_engine = whisper._get_local()
+            from .stt.continuous import ContinuousTranscriber
+
+            transcriber = ContinuousTranscriber(
+                buffer=buffer, engine=local_engine, samplerate=16000
+            )
+            transcriber.start()
+            _say("continuous STT ON (background transcription via local model).")
+        except Exception as e:
+            settings.continuous_stt = False
+            _say(
+                f"continuous STT unavailable ({e}); using classic "
+                f"transcribe-on-press path instead."
+            )
+    else:
+        _say("continuous STT OFF (classic transcribe-on-press path).")
 
     # Bias Whisper toward the candidate's own vocabulary (names, tech,
     # company terms) extracted from resume / JD / about-me. Big accuracy
@@ -158,6 +189,10 @@ def main() -> None:
             custom=settings.custom_system_prompt,
         )
         whisper.set_bias(vocab)
+        # Keep the background transcriber's engine biased too (it holds
+        # its own reference to the local engine).
+        if transcriber is not None:
+            transcriber.set_bias(vocab)
 
     _refresh_whisper_bias()
 
@@ -198,6 +233,7 @@ def main() -> None:
         scheduler=scheduler,
         prompt_builder=_prompt_for,
         history=history,
+        transcriber=transcriber,
     )
     _say("controller ready (memory keeps last 5 Q+A turns).")
 
@@ -224,6 +260,9 @@ def main() -> None:
             # model / STT backend selection takes effect on the next press.
             whisper.invalidate()
             _refresh_whisper_bias()
+            # Apply a live toggle of continuous transcription (start/stop
+            # the background thread to match the new checkbox state).
+            controller.apply_continuous_setting()
 
     overlay = OverlayWindow(
         settings,
@@ -325,6 +364,8 @@ def main() -> None:
     def cleanup() -> None:
         hotkeys.stop()
         capture.stop()
+        if transcriber is not None:
+            transcriber.stop()
 
     app.aboutToQuit.connect(cleanup)
 

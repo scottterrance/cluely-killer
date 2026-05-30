@@ -94,6 +94,7 @@ class Controller(QObject):
         scheduler: ExampleScheduler,
         prompt_builder: Callable[[Settings, bool], str],
         history: ConversationHistory,
+        transcriber=None,
     ):
         super().__init__()
         self.settings = settings
@@ -103,13 +104,50 @@ class Controller(QObject):
         self.scheduler = scheduler
         self.prompt_builder = prompt_builder
         self.history = history
+        # Optional ContinuousTranscriber (Phase 2). When present AND
+        # settings.continuous_stt is on, answers read the pre-built
+        # background transcript instead of transcribing on the press.
+        self.transcriber = transcriber
         self._busy = threading.Lock()
         # Sample-position marker: "last sample we already consumed in a
         # successful answer". Initialized to -1 so the very first press
         # falls back to ``answer_window_seconds`` instead of trying to
         # transcribe the entire current buffer (which on app start is
-        # mostly silence anyway).
+        # mostly silence anyway). Used by the classic on-press path.
         self._last_marker: int = -1
+        # Seq marker for the continuous path: "seq id of the last
+        # transcript segment already consumed". -1 means "first press,
+        # take everything currently buffered".
+        self._last_seq: int = -1
+
+    def _continuous_active(self) -> bool:
+        return bool(self.transcriber) and bool(self.settings.continuous_stt)
+
+    def apply_continuous_setting(self) -> None:
+        """Start or stop the background transcriber to match the current
+        ``settings.continuous_stt`` flag. Called after the Settings
+        dialog is saved so toggling the checkbox takes effect live.
+
+        Only acts if a transcriber object exists (it's created at launch
+        from the local model). If the local model was unavailable at
+        launch, transcriber is None and we can't turn it on mid-session -
+        the app stays on the on-press path until restart.
+        """
+        t = self.transcriber
+        if t is None:
+            return
+        want = bool(self.settings.continuous_stt)
+        running = getattr(t, "_thread", None) is not None
+        if want and not running:
+            # Re-arm the seq marker to "now" so we don't replay stale
+            # segments captured before it was paused, then start.
+            t.reset()
+            self._last_seq = t.current_seq()
+            t.start()
+            self.status.emit("Continuous transcription ON")
+        elif not want and running:
+            t.stop()
+            self.status.emit("Continuous transcription OFF (transcribe on press)")
 
     # ------------------------------------------------------------------
     def trigger_answer(self, mode: AnswerMode = "short") -> None:
@@ -140,12 +178,21 @@ class Controller(QObject):
         # arrived after the clear, never any pre-clear leftovers from
         # before _total_appended advanced past the wipe point.
         self._last_marker = self.audio_buffer.current_position()
+        # Continuous path: drop all background segments and re-arm the
+        # seq marker so the next press only sees post-clear speech.
+        if self.transcriber is not None:
+            self.transcriber.reset()
+            self._last_seq = self.transcriber.current_seq()
         self.history_changed.emit(0)
         self.status.emit("Audio buffer + memory cleared")
 
     # ------------------------------------------------------------------
     def _grab_audio(self):
-        """Return (audio_np, source_label) per the marker rules."""
+        """Return (audio_np, source_label) per the marker rules.
+
+        Classic on-press path only (continuous mode bypasses this and
+        reads pre-built text instead).
+        """
         if self._last_marker < 0:
             # First press of the session: no marker yet. Fall back to
             # the "classic" last-N-seconds slice so users don't have to
@@ -159,31 +206,72 @@ class Controller(QObject):
         )
         return audio, "since-last-press"
 
+    def _transcript_continuous(self):
+        """Continuous path: read the background transcript.
+
+        Returns (transcript, source_label, commit) where ``commit`` is a
+        zero-arg callable that advances the seq marker - called only on a
+        successful answer, mirroring the on-press path's marker advance.
+        """
+        t = self.transcriber
+        # Nudge the worker to transcribe the last partial chunk (the
+        # words the interviewer said in the ~2s before the press that
+        # haven't hit a natural pause yet), then read everything since
+        # our last consumed segment.
+        try:
+            t.flush_now(timeout=1.5)
+        except Exception:
+            pass
+        since = -1 if self._last_seq < 0 else self._last_seq
+        # since=-1 means "from the beginning of what's buffered"; the
+        # transcriber treats since_seq=0 as "all segments", so map -1->0.
+        text, latest_seq, covered = t.snapshot_since(
+            0 if since < 0 else since, self.settings.max_capture_seconds
+        )
+
+        def commit():
+            self._last_seq = latest_seq
+
+        label = f"continuous since seq {since} ({covered:.1f}s)"
+        return text, label, commit
+
     def _do_answer(self, mode: AnswerMode) -> None:
         try:
             self.status.emit("Transcribing...")
-            audio, source_label = self._grab_audio()
-            if audio.size < self.whisper.samplerate:  # less than 1 second
-                self.error.emit(
-                    "Not enough new audio yet - let the interviewer talk first."
-                )
-                return
+            commit_marker = None
 
-            captured_seconds = audio.size / self.whisper.samplerate
-            transcript = self.whisper.transcribe(audio)
-            if not transcript:
-                self.error.emit("No speech detected in the captured window.")
-                return
+            if self._continuous_active():
+                # Phase 2 fast path: transcript already exists.
+                transcript, source_label, commit_marker = self._transcript_continuous()
+                if not transcript:
+                    self.error.emit(
+                        "Not enough new speech captured yet - let the "
+                        "interviewer talk a moment, then press again."
+                    )
+                    return
+                captured_seconds = 0.0  # STT happened in the background
+            else:
+                # Classic on-press path.
+                audio, source_label = self._grab_audio()
+                if audio.size < self.whisper.samplerate:  # less than 1 second
+                    self.error.emit(
+                        "Not enough new audio yet - let the interviewer talk first."
+                    )
+                    return
+                captured_seconds = audio.size / self.whisper.samplerate
+                transcript = self.whisper.transcribe(audio)
+                if not transcript:
+                    self.error.emit("No speech detected in the captured window.")
+                    return
+
             self.transcript_ready.emit(transcript)
             print(
                 f"[answer] mode={mode} source={source_label} "
-                f"audio={captured_seconds:.1f}s transcript={transcript[:200]!r}",
+                f"transcript={transcript[:200]!r}",
                 flush=True,
             )
 
-            self.status.emit(
-                f"Thinking ({mode}, {captured_seconds:.0f}s)..."
-            )
+            self.status.emit(f"Thinking ({mode})...")
             include_example = self.scheduler.should_include()
             system_prompt = self.prompt_builder(self.settings, include_example)
             llm = self.llm_factory(self.settings)
@@ -250,7 +338,12 @@ class Controller(QObject):
                 # done" the moment our transcribe call finished; any
                 # audio still arriving after this is the START of the
                 # next question.
-                self._last_marker = self.audio_buffer.current_position()
+                if commit_marker is not None:
+                    # Continuous path: advance the seq marker.
+                    commit_marker()
+                else:
+                    # Classic path: advance the audio-position marker.
+                    self._last_marker = self.audio_buffer.current_position()
                 # Both modes feed history. The difference between
                 # modes is whether we *read* history on the way in,
                 # not whether we write to it on the way out - the
