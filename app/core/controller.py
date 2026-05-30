@@ -84,6 +84,14 @@ class Controller(QObject):
     error = pyqtSignal(str)
     status = pyqtSignal(str)
     history_changed = pyqtSignal(int)  # current turn count
+    # Ground-truth backend report for the answer that just ran:
+    #   (stt_label, llm_label, fell_back)
+    # This reflects what ACTUALLY served the answer - including silent
+    # fallback (Groq out of tokens -> DeepSeek) and the fact that
+    # continuous mode always transcribes locally - NOT merely what's
+    # selected in Settings. ``fell_back`` is True when the engine that
+    # ran differs from the one the user selected.
+    backend_used = pyqtSignal(str, str, bool)
 
     def __init__(
         self,
@@ -239,6 +247,7 @@ class Controller(QObject):
         try:
             self.status.emit("Transcribing...")
             commit_marker = None
+            stt_label = "?"
 
             if self._continuous_active():
                 # Phase 2 fast path: transcript already exists.
@@ -250,6 +259,10 @@ class Controller(QObject):
                     )
                     return
                 captured_seconds = 0.0  # STT happened in the background
+                # Continuous transcription ALWAYS runs on the local model,
+                # regardless of the cloud/local setting - so report it
+                # honestly as local (background).
+                stt_label = "local (continuous)"
             else:
                 # Classic on-press path.
                 audio, source_label = self._grab_audio()
@@ -263,6 +276,11 @@ class Controller(QObject):
                 if not transcript:
                     self.error.emit("No speech detected in the captured window.")
                     return
+                # Ground truth: which STT engine actually transcribed it
+                # (STTRouter sets last_used; may differ from the setting
+                # if the primary backend failed and it fell back).
+                used = getattr(self.whisper, "last_used", "") or self.settings.stt_backend
+                stt_label = "cloud (Groq)" if used == "cloud" else "local"
 
             self.transcript_ready.emit(transcript)
             print(
@@ -300,6 +318,11 @@ class Controller(QObject):
                 err_msg = _friendly_error(e)
 
             full = "".join(chunks).strip()
+            # Ground truth: which LLM actually produced the answer. The
+            # LLMRouter sets last_used to the provider that streamed the
+            # first token (may be the fallback if the primary errored).
+            llm_used = getattr(llm, "last_used", "") or self.settings.llm_backend
+            llm_label = "Groq" if llm_used == "groq" else "DeepSeek"
             print(
                 f"[answer] streamed {len(chunks)} chunks, "
                 f"{len(full)} chars, err={err_msg!r}",
@@ -330,6 +353,26 @@ class Controller(QObject):
                 self.answer_chunk.emit(separator + fallback)
 
             self.answer_finished.emit()
+
+            # Emit the ground-truth backend report so the overlay badge
+            # reflects what ACTUALLY ran (incl. silent fallback), not just
+            # the Settings selection. Compute whether either engine
+            # differs from what the user selected.
+            stt_fell_back = (
+                not self._continuous_active()
+                and (getattr(self.whisper, "last_used", "") or self.settings.stt_backend)
+                != self.settings.stt_backend
+            )
+            llm_fell_back = (
+                (getattr(llm, "last_used", "") or self.settings.llm_backend)
+                != self.settings.llm_backend
+            )
+            self.backend_used.emit(stt_label, llm_label, stt_fell_back or llm_fell_back)
+            print(
+                f"[answer] BACKENDS USED -> STT: {stt_label} | LLM: {llm_label}"
+                + ("  (FELL BACK from selection)" if (stt_fell_back or llm_fell_back) else ""),
+                flush=True,
+            )
 
             success = not err_msg and full and full.upper() != "SKIP"
             if success:
