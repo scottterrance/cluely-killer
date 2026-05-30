@@ -50,8 +50,8 @@ def main() -> None:
     if simple_mode:
         _say("--simple: using a normal titled window.")
 
-    # API keys from .env if present (only loaded if the user hasn't
-    # already entered one in Settings).
+    # DeepSeek key + overrides from .env if present (only loaded if the
+    # user hasn't already entered one in Settings).
     ds_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if ds_key and not settings.deepseek_api_key:
         settings.deepseek_api_key = ds_key
@@ -65,16 +65,6 @@ def main() -> None:
     if ds_model_env:
         settings.deepseek_model = ds_model_env
         _say(f"DEEPSEEK_MODEL override = {ds_model_env!r}")
-
-    groq_key = os.getenv("GROQ_API_KEY", "").strip()
-    if groq_key and not settings.groq_api_key:
-        settings.groq_api_key = groq_key
-        save_settings(settings)
-        _say("loaded GROQ_API_KEY from .env")
-    groq_model_env = os.getenv("GROQ_MODEL", "").strip()
-    if groq_model_env:
-        settings.groq_model = groq_model_env
-        _say(f"GROQ_MODEL override = {groq_model_env!r}")
 
     _say("creating QApplication...")
     from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -127,64 +117,47 @@ def main() -> None:
     capture.start()
     _say("audio capture started.")
 
-    # ---- STT (router: cloud Groq turbo OR local faster-whisper) ----
+    # ---- STT (local faster-whisper, offline) ----
     _say(
-        f"initializing STT (backend={settings.stt_backend!r}; "
-        f"local model '{settings.whisper_model}', cloud '{settings.groq_stt_model}')..."
+        f"loading local Whisper '{settings.whisper_model}' "
+        f"({settings.whisper_compute} on {settings.whisper_device})..."
     )
-    from .stt.router import STTRouter
+    from .stt.whisper_engine import WhisperEngine
 
-    whisper = STTRouter(settings)
-    # Eagerly build ONLY the selected primary backend so its
-    # key/model/load errors surface at startup. We deliberately do NOT
-    # pre-build the OTHER backend: when the user picked cloud, loading
-    # the 1.5GB local model wastes ~RAM and CPU for nothing (and vice
-    # versa). The router lazily builds the fallback only if the primary
-    # actually fails at call time.
     try:
-        whisper._engine(settings.stt_backend)
-        _say(f"STT backend '{settings.stt_backend}' ready (primary warm).")
-    except Exception as e:
-        _say(f"STT primary '{settings.stt_backend}' not ready ({e}); fallback will be tried on first use.")
-
-    # ---- Continuous background transcription (Phase 2) ----
-    # A daemon thread transcribes the audio buffer as the interviewer
-    # talks, using the LOCAL whisper model ONLY (never the metered cloud
-    # STT). On a hotkey press the answer reads this pre-built transcript,
-    # so Whisper is off the press critical path. If the local model
-    # isn't available we disable continuous mode and fall back to the
-    # classic transcribe-on-press path.
-    #
-    # CRITICAL: only run the background loop when STT backend is LOCAL.
-    # When the backend is CLOUD, a local loop is pure harm - it pegs the
-    # CPU running large-v3-turbo, which (a) starves the audio capture
-    # thread (the 'data discontinuity' warnings) and (b) delays Python
-    # reading the cloud HTTP response, inflating cloud round-trips. The
-    # field logs proved this: STT spiked to 17s/33s WHILE the local loop
-    # ran, then settled to ~5s the moment it was stopped.
-    transcriber = None
-    want_continuous = settings.continuous_stt and settings.stt_backend == "local"
-    if settings.continuous_stt and settings.stt_backend != "local":
-        _say(
-            "continuous STT requested but STT backend is 'cloud' -> NOT "
-            "starting the local loop (it would peg the CPU and slow cloud "
-            "calls). Cloud transcribes on press."
+        whisper = WhisperEngine(
+            model_size=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute,
+            allow_auto_download=settings.whisper_allow_auto_download,
+            cpu_threads=settings.whisper_cpu_threads,
         )
-    if want_continuous:
+        _say("Whisper model loaded.")
+    except Exception as e:
+        # Without the local model the app can't transcribe at all. Surface
+        # a clear message; the overlay will still open so the user can read
+        # the error and fix the model path.
+        _say(f"FATAL: could not load local Whisper model: {e}")
+        raise
+
+    # ---- Continuous background transcription ----
+    # A daemon thread transcribes the audio buffer as the interviewer
+    # talks (local model). On a hotkey press the answer reads this
+    # pre-built transcript, so Whisper is off the press critical path.
+    transcriber = None
+    if settings.continuous_stt:
         try:
-            local_engine = whisper._get_local()
             from .stt.continuous import ContinuousTranscriber
 
             transcriber = ContinuousTranscriber(
-                buffer=buffer, engine=local_engine, samplerate=16000
+                buffer=buffer, engine=whisper, samplerate=16000
             )
             transcriber.start()
-            _say("continuous STT ON (background transcription via local model).")
+            _say("continuous STT ON (background transcription).")
         except Exception as e:
             settings.continuous_stt = False
             _say(
-                f"continuous STT unavailable ({e}); using classic "
-                f"transcribe-on-press path instead."
+                f"continuous STT unavailable ({e}); using transcribe-on-press."
             )
     else:
         _say("continuous STT OFF (transcribe-on-press path).")
@@ -221,17 +194,18 @@ def main() -> None:
     from .core.history import ConversationHistory
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
-    from .llm.router import LLMRouter
+    from .llm.deepseek_provider import DeepSeekProvider
     from .prompts.builder import ExampleScheduler, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
 
     def _llm_factory(s) -> LLMProvider:
-        # Router picks Groq or DeepSeek per s.llm_backend and falls back
-        # to the other automatically if the primary errors before the
-        # first token (e.g. Groq free-tier tokens exhausted).
-        return LLMRouter(s)
+        return DeepSeekProvider(
+            api_key=s.deepseek_api_key,
+            model=s.deepseek_model,
+            base_url=s.deepseek_base_url,
+        )
 
     def _prompt_for(s, include_example: bool) -> str:
         return build_system_prompt(
@@ -256,18 +230,6 @@ def main() -> None:
     )
     _say("controller ready (memory keeps last 5 Q+A turns).")
 
-    # When the controller auto-switches STT (local kept lagging -> cloud),
-    # persist the change to config.json and stop the now-unneeded
-    # background transcriber thread so it stops pegging the CPU.
-    def _on_settings_mutated() -> None:
-        save_settings(settings)
-        try:
-            controller.apply_continuous_setting()  # stops thread if now off
-        except Exception:
-            pass
-        whisper.invalidate()  # ensure next press builds the cloud engine
-    controller.on_settings_mutated = _on_settings_mutated
-
     # ---- UI ----
     _say("building overlay window...")
     hotkeys = HotkeyManager()
@@ -287,9 +249,6 @@ def main() -> None:
             # Resume / JD / about-me may have changed -> rebuild the
             # Whisper biasing vocabulary so STT accuracy tracks the new
             # context immediately (no restart needed).
-            # Also drop the cached cloud STT client so a new Groq key /
-            # model / STT backend selection takes effect on the next press.
-            whisper.invalidate()
             _refresh_whisper_bias()
             # Apply a live toggle of continuous transcription (start/stop
             # the background thread to match the new checkbox state).

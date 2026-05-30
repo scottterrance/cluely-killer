@@ -1,42 +1,29 @@
-"""Always-on background transcriber (Phase 2: continuous STT).
+"""Always-on background transcriber (continuous STT).
 
-The whole point of Phase 2 is to move Whisper OFF the hotkey critical
-path. Instead of transcribing on press (which costs seconds), a
-background thread continuously transcribes the audio buffer as the
-interviewer talks, maintaining a live list of timestamped transcript
-segments in memory. When the user presses '1'/'2', the Controller just
-*reads text that already exists* - STT latency on the press path drops
-to ~0, and the only thing left on the clock is the LLM call.
+Moves Whisper OFF the hotkey critical path. A background thread
+continuously transcribes the audio buffer as the interviewer talks,
+maintaining a live list of timestamped transcript segments. When the
+user presses '1'/'2', the Controller just *reads text that already
+exists* - STT latency on the press path drops to ~0, and the only thing
+left on the clock is the LLM call.
 
 Design
 ------
 * One daemon thread loops ~4x/second.
-* It tracks a cursor ``_done_pos`` = the absolute sample index up to
-  which audio has already been transcribed. The unprocessed tail is
-  ``[_done_pos, buffer.current_position())``.
-* It only flushes a chunk to Whisper when EITHER:
-    - the tail reaches ``max_chunk_seconds`` (so a non-stop talker still
-      gets transcribed in bounded pieces), OR
-    - the tail is at least ``min_chunk_seconds`` long AND the most
-      recent ``silence_hold`` seconds look like silence (i.e. the
-      speaker paused - a natural sentence/question boundary).
-  Transcribing on pauses keeps segments clean and gives Whisper full
-  phrases rather than mid-word cuts.
-* Each transcribed chunk becomes a ``Segment(start, end, text)`` where
-  start/end are absolute sample positions. Segments accumulate (capped)
-  so the Controller can pull "everything spoken since marker P".
+* Cursor ``_done_pos`` = absolute sample index already transcribed; the
+  unprocessed tail is ``[_done_pos, buffer.current_position())``.
+* Flush a chunk to Whisper when EITHER the tail reaches
+  ``max_chunk_seconds`` (bounded pieces for a non-stop talker) OR the
+  tail is >= ``min_chunk_seconds`` and the speaker just paused (natural
+  sentence boundary).
+* SILENCE-SKIP: before transcribing a chunk, check its RMS. If it's
+  essentially silence (no one spoke), skip Whisper entirely and just
+  advance the cursor. This is critical on a slow CPU - it stops the
+  loop from burning time transcribing dead air, keeping it caught up
+  with real time and freeing the CPU for the actual questions.
 
-Why local-only
---------------
-This loop runs many times per question, so it MUST be free. It always
-uses the local faster-whisper engine - never the metered Groq cloud STT
-(that would burn your free-tier quota in minutes). If the local model
-isn't present, continuous mode simply can't run and the app falls back
-to the classic on-press transcription path (see Controller).
-
-Thread-safety: the segment list and cursor are guarded by a lock. The
-public methods (``snapshot_since``, ``current_seq``, ``reset``) are safe
-to call from the Qt/Controller threads while the worker runs.
+Local model only: this loop runs many times per question and must be
+free. There is no cloud STT in this build.
 """
 from __future__ import annotations
 
@@ -48,6 +35,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..audio.buffer import RollingAudioBuffer
+from .audio_proc import rms
 from .base import STTEngine
 
 
@@ -121,8 +109,7 @@ class ContinuousTranscriber:
         Monotonic: ``reset()`` does NOT zero this (mirroring the audio
         buffer's monotonic ``_total_appended``). That guarantees a stale
         marker held by the Controller yields an empty snapshot after a
-        reset instead of replaying pre-reset segments. The Controller
-        re-reads this into ``_last_seq`` right after calling ``reset()``.
+        reset instead of replaying pre-reset segments.
         """
         with self._lock:
             return self._seq
@@ -130,8 +117,7 @@ class ContinuousTranscriber:
     def reset(self) -> None:
         """Forget all segments and skip the cursor to 'now'. Called on
         Ctrl+R so a new topic starts from a clean slate. The seq counter
-        stays monotonic (see ``current_seq``); only the stored segments
-        and the transcription cursor are reset.
+        stays monotonic (see ``current_seq``).
         """
         with self._lock:
             self._segments.clear()
@@ -141,11 +127,10 @@ class ContinuousTranscriber:
         """Return (joined_text, latest_seq, covered_seconds) for every
         segment with seq > ``since_seq``.
 
-        The text is capped to roughly the most recent ``max_seconds`` of
-        audio (mirrors the on-press ``max_capture_seconds`` ceiling) by
-        dropping the oldest segments first when the span is too long.
-        ``latest_seq`` is what the Controller stores as its new marker
-        after a successful answer.
+        Text is capped to roughly the most recent ``max_seconds`` of
+        audio by dropping the oldest segments first when the span is too
+        long. ``latest_seq`` is what the Controller stores as its new
+        marker after a successful answer.
         """
         cap_samples = int(max(0.0, max_seconds) * self.samplerate)
         with self._lock:
@@ -153,7 +138,6 @@ class ContinuousTranscriber:
             if not picked:
                 latest = self._segments[-1].seq if self._segments else since_seq
                 return "", latest, 0.0
-            # Trim oldest-first so the captured span stays within the cap.
             if cap_samples > 0:
                 total = picked[-1].end - picked[0].start
                 while len(picked) > 1 and total > cap_samples:
@@ -164,10 +148,6 @@ class ContinuousTranscriber:
             return text, picked[-1].seq, covered
 
     def has_pending_audio(self) -> bool:
-        """True if there's un-transcribed audio in the tail right now.
-        Used by the Controller to decide whether to wait briefly for the
-        worker to flush before answering.
-        """
         with self._lock:
             return self.buffer.current_position() - self._done_pos >= self.min_chunk
 
@@ -177,11 +157,6 @@ class ContinuousTranscriber:
         includes the last few words the interviewer just said, even if
         they didn't pause long enough (or speak long enough) to trigger
         an automatic flush.
-
-        Because the press sets the force flag, the worker's next tick
-        flushes the whole tail regardless of length. We wait until the
-        cursor has actually caught up to where the buffer was at press
-        time (a later-arriving tail is the NEXT question, not this one).
         """
         target = self.buffer.current_position()
         self._force_flush.set()
@@ -193,18 +168,62 @@ class ContinuousTranscriber:
                 return
             time.sleep(0.03)
 
-    # -- worker --------------------------------------------------------
-    def _rms(self, audio: np.ndarray) -> float:
-        if audio.size == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+    def backlog_seconds(self) -> float:
+        """Seconds of un-transcribed audio queued right now. A large
+        value => the local model can't keep up with real time.
+        """
+        with self._lock:
+            return (self.buffer.current_position() - self._done_pos) / self.samplerate
 
+    def transcribe_recent(self, max_seconds: float) -> str:
+        """Transcribe the most-recent ``max_seconds`` of audio DIRECTLY,
+        bypassing the segment backlog, and fast-forward the cursor to now.
+
+        Escape hatch for when the background loop has fallen behind:
+        reading the accumulated segments would answer a stale question,
+        so we grab the latest audio window, isolate the last utterance,
+        transcribe it once on the calling thread, and reset the cursor.
+        """
+        now = self.buffer.current_position()
+        want = int(max(1.0, max_seconds) * self.samplerate)
+        start = max(0, now - want)
+        audio = self.buffer.get_range(start, now)
+        text = ""
+        if audio.size >= self.samplerate * 0.4:
+            try:
+                # isolate_last: send only the interviewer's last question.
+                text = self.engine.transcribe(audio, isolate_last=True)
+            except TypeError:
+                # Engine without the isolate_last kwarg (defensive).
+                text = self.engine.transcribe(audio)
+            except Exception as e:
+                self.last_error = f"{type(e).__name__}: {e}"
+                traceback.print_exc()
+        with self._lock:
+            self._done_pos = now
+            if text:
+                self._seq += 1
+                self._segments.append(
+                    Segment(start=start, end=now, text=text, seq=self._seq)
+                )
+                if len(self._segments) > self.max_segments:
+                    self._segments = self._segments[-self.max_segments:]
+        return text
+
+    def set_bias(self, keywords: list[str]) -> None:
+        """Forward biasing to the underlying engine."""
+        try:
+            self.engine.set_bias(keywords)
+        except Exception:
+            pass
+
+    # -- worker --------------------------------------------------------
     def _looks_like_pause(self, tail_end: int) -> bool:
         """Is the most recent silence_hold window quiet (speaker paused)?"""
         win = self.buffer.get_range(tail_end - self.silence_hold, tail_end)
         if win.size < self.silence_hold * 0.5:
             return False
-        return self._rms(win) < self.silence_rms
+        return rms(win) < self.silence_rms
 
     def _run(self) -> None:
         ff = self._force_flush
@@ -226,14 +245,6 @@ class ContinuousTranscriber:
             return
 
         # Decide whether to flush a chunk.
-        #   - max_chunk reached: hard-cap flush (bounded pieces for a
-        #     non-stop talker), leaving the remainder for next tick.
-        #   - forced (hotkey press): flush whatever is there NOW, even a
-        #     short tail. The user explicitly asked for an answer, so we
-        #     must not swallow the last few words just because they came
-        #     in under min_chunk.
-        #   - otherwise: flush only once we have >= min_chunk AND the
-        #     speaker just paused (natural sentence boundary).
         flush_end: int | None = None
         if pending >= self.max_chunk:
             flush_end = done + self.max_chunk
@@ -246,12 +257,20 @@ class ContinuousTranscriber:
             return
 
         audio = self.buffer.get_range(done, flush_end)
-        # Floor on FORCED flushes is lower (0.2s) than automatic ones,
-        # but we still need *something* to transcribe.
         min_audio = self.samplerate * (0.2 if forced else 0.4)
         if audio.size < min_audio:
-            # Mostly evicted or too short - advance the cursor anyway so
-            # we don't get stuck retrying the same gap forever.
+            with self._lock:
+                self._done_pos = flush_end
+            return
+
+        # SILENCE-SKIP: if this chunk is essentially silence, don't waste
+        # CPU running Whisper on it (and don't risk a hallucinated
+        # segment from dead air). Just advance the cursor. This keeps the
+        # loop caught up on slow machines - the chunks that actually
+        # contain speech are the only ones that pay the Whisper cost.
+        # A forced (press-time) flush still runs even if quiet, so a
+        # barely-audible question isn't dropped.
+        if not forced and rms(audio) < self.silence_rms:
             with self._lock:
                 self._done_pos = flush_end
             return
@@ -262,8 +281,6 @@ class ContinuousTranscriber:
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
             traceback.print_exc()
-            # Advance cursor past this chunk to avoid a tight retry loop
-            # on a persistently failing region.
             with self._lock:
                 self._done_pos = flush_end
             return
@@ -282,60 +299,3 @@ class ContinuousTranscriber:
                     f"({(flush_end-done)/self.samplerate:.1f}s): {text[:80]!r}",
                     flush=True,
                 )
-
-    def backlog_seconds(self) -> float:
-        """How many seconds of un-transcribed audio are queued right now.
-        Large backlog => the local model can't keep up with real time and
-        the segments are stale (answering an old question).
-        """
-        with self._lock:
-            return (self.buffer.current_position() - self._done_pos) / self.samplerate
-
-    def transcribe_recent(self, max_seconds: float, engine: "STTEngine | None" = None) -> str:
-        """Transcribe the most-recent ``max_seconds`` of audio DIRECTLY,
-        bypassing the segment backlog, and fast-forward the cursor to now.
-
-        This is the escape hatch for slow machines: when the background
-        loop has fallen behind (backlog > a few seconds), reading the
-        accumulated segments would answer a stale question. Instead we
-        grab the latest audio window, transcribe it once on the calling
-        thread, and reset the cursor so the worker resumes cleanly from
-        the present. The result is "what was just said".
-
-        ``engine`` lets the caller pass a FASTER engine (e.g. Groq cloud
-        STT) for this one synchronous call while the background loop keeps
-        using the local model. If None, the background engine is used.
-        """
-        eng = engine or self.engine
-        now = self.buffer.current_position()
-        # Pull up to max_seconds of the most recent audio.
-        want = int(max(1.0, max_seconds) * self.samplerate)
-        start = max(0, now - want)
-        audio = self.buffer.get_range(start, now)
-        text = ""
-        if audio.size >= self.samplerate * 0.4:
-            try:
-                text = eng.transcribe(audio)
-            except Exception as e:
-                self.last_error = f"{type(e).__name__}: {e}"
-                traceback.print_exc()
-        # Fast-forward: everything up to now is considered consumed, and
-        # we record a synthetic segment so seq advances and future
-        # snapshot_since(seq) calls behave consistently.
-        with self._lock:
-            self._done_pos = now
-            if text:
-                self._seq += 1
-                self._segments.append(
-                    Segment(start=start, end=now, text=text, seq=self._seq)
-                )
-                if len(self._segments) > self.max_segments:
-                    self._segments = self._segments[-self.max_segments:]
-        return text
-
-    def set_bias(self, keywords: list[str]) -> None:
-        """Forward biasing to the underlying engine."""
-        try:
-            self.engine.set_bias(keywords)
-        except Exception:
-            pass

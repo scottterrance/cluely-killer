@@ -105,46 +105,13 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
-        # ---- Backend selectors (the two dropdowns the user asked for) ----
-        self.llm_backend_combo = QComboBox()
-        self.llm_backend_combo.addItem("Groq (cloud, fast, free tier)", "groq")
-        self.llm_backend_combo.addItem("DeepSeek (cloud, cheap, stable)", "deepseek")
-        i = self.llm_backend_combo.findData(self.settings.llm_backend)
-        self.llm_backend_combo.setCurrentIndex(i if i >= 0 else 0)
-
-        self.stt_backend_combo = QComboBox()
-        self.stt_backend_combo.addItem("Cloud turbo (Groq Whisper large-v3-turbo)", "cloud")
-        self.stt_backend_combo.addItem("Local turbo (bundled faster-whisper)", "local")
-        i = self.stt_backend_combo.findData(self.settings.stt_backend)
-        self.stt_backend_combo.setCurrentIndex(i if i >= 0 else 0)
-
-        f.addRow(QLabel("<b>Backends</b> <i>(the app auto-falls-back to the other "
-                        "if the chosen one errors - e.g. Groq free tokens run out)</i>"))
-        f.addRow("Answer engine (LLM):", self.llm_backend_combo)
-        f.addRow("Transcription (STT):", self.stt_backend_combo)
-
-        # ---- Groq ----
-        self.groq_key = QLineEdit(self.settings.groq_api_key)
-        self.groq_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.groq_model = QLineEdit(self.settings.groq_model)
-        self.groq_stt_model = QLineEdit(self.settings.groq_stt_model)
-        f.addRow(QLabel(
-            "<hr><b>Groq (one free key powers BOTH cloud chat + cloud STT)</b>"
-            "<br><i>Get a free key at <code>https://console.groq.com/keys</code>. "
-            "Chat models: <code>llama-3.3-70b-versatile</code> (recommended) or "
-            "<code>llama-3.1-8b-instant</code> (fastest).</i>"
-        ))
-        f.addRow("Groq API key:", self.groq_key)
-        f.addRow("Groq chat model:", self.groq_model)
-        f.addRow("Groq STT model:", self.groq_stt_model)
-
-        # ---- DeepSeek ----
+        # ---- DeepSeek (the only LLM) ----
         self.deepseek_key = QLineEdit(self.settings.deepseek_api_key)
         self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.deepseek_model = QLineEdit(self.settings.deepseek_model)
         self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
         f.addRow(QLabel(
-            "<hr><b>DeepSeek (cloud LLM fallback, ~$0.14/M tokens)</b>"
+            "<b>DeepSeek (cloud LLM, ~$0.14/M tokens)</b>"
             "<br><i>Get a key at <code>https://platform.deepseek.com/api_keys</code>. "
             "Models: <code>deepseek-chat</code> (V3, fast - recommended) or "
             "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
@@ -152,6 +119,10 @@ class SettingsDialog(QDialog):
         f.addRow("DeepSeek API key:", self.deepseek_key)
         f.addRow("DeepSeek model:", self.deepseek_model)
         f.addRow("DeepSeek base URL:", self.deepseek_base_url)
+        f.addRow(QLabel(
+            "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
+            "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
+        ))
         return w
 
     def _context_tab(self) -> QWidget:
@@ -395,13 +366,19 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
-        # The STT backend itself is chosen on the AI Provider tab. This
-        # tab only configures the LOCAL model + the capture windows. The
-        # local model is the one bundled next to the .exe (offline); the
-        # cloud STT model is set on the AI Provider tab.
+        # The local Whisper model bundled next to the .exe (offline).
         self.whisper_model_label = QLabel(
             f"<code>{self.settings.whisper_model}</code> (bundled local model, offline)"
         )
+
+        # CTranslate2 worker threads. Higher = faster local STT on a
+        # multi-core CPU. 0 = auto (all cores minus one).
+        import os as _os
+        self.cpu_threads_spin = QDoubleSpinBox()
+        self.cpu_threads_spin.setDecimals(0)
+        self.cpu_threads_spin.setRange(0, float(max(2, (_os.cpu_count() or 8))))
+        self.cpu_threads_spin.setSingleStep(1)
+        self.cpu_threads_spin.setValue(float(self.settings.whisper_cpu_threads))
 
         # First-press fallback window. Only used on the very first
         # answer of a session, before the since-last-press marker has
@@ -412,17 +389,14 @@ class SettingsDialog(QDialog):
         self.window_spin.setSingleStep(1.0)
         self.window_spin.setValue(self.settings.answer_window_seconds)
 
-        # Hard ceiling on since-last-press audio. If the interviewer
-        # rambles past this, only the most-recent N seconds get sent
-        # to Whisper / the LLM.
+        # Hard ceiling on since-last-press audio.
         self.max_capture_spin = QDoubleSpinBox()
         self.max_capture_spin.setRange(15.0, 600.0)
         self.max_capture_spin.setSingleStep(5.0)
         self.max_capture_spin.setValue(self.settings.max_capture_seconds)
 
-        # Continuous STT toggle (Phase 2). When on, a background thread
-        # transcribes as the interviewer talks so the press path is just
-        # the LLM call. Uses the LOCAL model only - costs no cloud quota.
+        # Continuous STT toggle. When on, a background thread transcribes
+        # as the interviewer talks so the press path is just the LLM call.
         self.continuous_check = QCheckBox(
             "Continuous transcription (background, near-instant answers)"
         )
@@ -436,20 +410,20 @@ class SettingsDialog(QDialog):
         self.bias_check.setChecked(self.settings.stt_bias_enabled)
 
         f.addRow("Local Whisper model:", self.whisper_model_label)
+        f.addRow("CPU threads (0 = auto):", self.cpu_threads_spin)
         f.addRow("First-press window (sec):", self.window_spin)
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(self.continuous_check)
         f.addRow(self.bias_check)
         f.addRow(QLabel(
-            "<i><b>Continuous transcription</b> runs the <b>local</b> Whisper "
-            "model in the background as the interviewer talks, so pressing "
-            "'1'/'2' only waits for the AI answer - not for transcription. "
-            "It uses your CPU but <b>no extra cloud quota</b>, and needs the "
-            "local model present. <b>If your CPU is slow, turn this OFF and set "
-            "Transcription = Cloud turbo on the AI Provider tab</b> for the "
-            "fastest, most accurate results.<br><br>"
-            "Each press of '1' or '2' covers everything the interviewer said "
-            "since the previous press, capped at <b>Max capture</b>.</i>"
+            "<i><b>Continuous transcription</b> runs the local Whisper model "
+            "in the background as the interviewer talks, so pressing '1'/'2' "
+            "only waits for the AI answer - not for transcription.<br><br>"
+            "On each press, only the interviewer's <b>last question</b> is "
+            "transcribed (not the whole window), which is the main local-STT "
+            "speedup. Raise <b>CPU threads</b> if you have spare cores.<br><br>"
+            "Each press of '1' or '2' covers everything said since the previous "
+            "press, capped at <b>Max capture</b>.</i>"
         ))
         return w
 
@@ -499,16 +473,7 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         s = self.settings
 
-        # Backend selectors
-        s.llm_backend = self.llm_backend_combo.currentData() or "groq"
-        s.stt_backend = self.stt_backend_combo.currentData() or "cloud"
-
-        # Groq
-        s.groq_api_key = self.groq_key.text().strip()
-        s.groq_model = self.groq_model.text().strip() or "llama-3.3-70b-versatile"
-        s.groq_stt_model = self.groq_stt_model.text().strip() or "whisper-large-v3-turbo"
-
-        # DeepSeek
+        # DeepSeek (the only LLM provider)
         s.deepseek_api_key = self.deepseek_key.text().strip()
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
@@ -518,8 +483,7 @@ class SettingsDialog(QDialog):
         s.job_description = self.job_edit.toPlainText()
         s.custom_system_prompt = self.custom_edit.toPlainText()
 
-        # Whisper model is hard-pinned to 'small' (bundled). Don't let
-        # anyone overwrite it from the UI.
+        s.whisper_cpu_threads = int(self.cpu_threads_spin.value())
         s.answer_window_seconds = float(self.window_spin.value())
         s.max_capture_seconds = float(self.max_capture_spin.value())
         s.continuous_stt = self.continuous_check.isChecked()

@@ -6,13 +6,13 @@
 # Output: dist/cluely-killer/cluely-killer.exe  (one-folder bundle).
 # To distribute, zip the entire dist/cluely-killer/ folder.
 #
-# THIS BUILD BUNDLES THE WHISPER 'large-v3-turbo' MODEL (for local STT).
+# THIS BUILD BUNDLES THE WHISPER 'large-v3-turbo' MODEL (local STT).
 # Before running build.bat, stage the model with `setup-model.ps1` once
 # (it downloads large-v3-turbo into ./models/whisper-large-v3-turbo/).
 # build.bat then copies ./models/ next to the .exe so the end user's
-# machine never downloads anything - even when STT backend = local.
-# Cloud STT (Groq) needs no local model. Final dist size ~2 GB with the
-# turbo model bundled (the model alone is ~1.6 GB at int8).
+# machine never downloads anything. Transcription is fully local/offline;
+# only the DeepSeek answer call needs the network. Final dist size ~2 GB
+# (the model alone is ~1.5 GB at int8).
 
 # ruff: noqa
 import os
@@ -34,9 +34,8 @@ lazy_hidden = [
     "docx",
     "lxml",
     "lxml.etree",
-    # httpx is imported by the LLM providers + cloud STT. It's normally
-    # picked up via analysis, but list it explicitly so a cloud-only
-    # build can't accidentally drop it.
+    # httpx is imported by the DeepSeek provider. Normally picked up via
+    # analysis, but list it explicitly to be safe.
     "httpx",
 ]
 

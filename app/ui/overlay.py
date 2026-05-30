@@ -151,16 +151,13 @@ class OverlayWindow(QWidget):
         self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
         header.addWidget(self.mem_label)
 
-        # Ground-truth backend badge: shows which STT + LLM ACTUALLY
-        # served the last answer (not just what's selected in Settings).
-        # Starts neutral; populated after the first answer.
+        # Ground-truth engine badge: shows which STT path + LLM produced
+        # the last answer (local continuous / local on-press, + DeepSeek).
         self.backend_label = QLabel("engine: -")
         self.backend_label.setObjectName("backendBadge")
         self.backend_label.setProperty("alarm", "false")
         self.backend_label.setToolTip(
-            "Which engines actually produced the last answer.\n"
-            "Updates after every press, and turns amber if the app had to "
-            "fall back from your selected backend (e.g. Groq out of tokens)."
+            "Which engines produced the last answer. Updates after every press."
         )
         header.addWidget(self.backend_label)
 
@@ -298,24 +295,12 @@ class OverlayWindow(QWidget):
 
     @pyqtSlot(str, str, bool)
     def _on_backend_used(self, stt_label: str, llm_label: str, fell_back: bool) -> None:
-        # Compact ground-truth readout, e.g. "STT cloud (Groq) | LLM Groq".
+        # Compact ground-truth readout, e.g. "local (continuous) | DeepSeek".
         self.backend_label.setText(f"{stt_label}  |  {llm_label}")
-        if fell_back:
-            self.backend_label.setToolTip(
-                f"ACTUAL engines for the last answer:\n"
-                f"  STT: {stt_label}\n  LLM: {llm_label}\n\n"
-                f"AMBER = the app FELL BACK from your selected backend "
-                f"(e.g. Groq ran out of tokens, or the local model wasn't "
-                f"available). Check Settings -> AI Provider."
-            )
-        else:
-            self.backend_label.setToolTip(
-                f"ACTUAL engines for the last answer:\n"
-                f"  STT: {stt_label}\n  LLM: {llm_label}\n\n"
-                f"Green/neutral = matches your Settings selection."
-            )
+        self.backend_label.setToolTip(
+            f"Engines for the last answer:\n  STT: {stt_label}\n  LLM: {llm_label}"
+        )
         self.backend_label.setProperty("alarm", "true" if fell_back else "false")
-        # Re-evaluate the [alarm] style selector.
         self.backend_label.style().unpolish(self.backend_label)
         self.backend_label.style().polish(self.backend_label)
 

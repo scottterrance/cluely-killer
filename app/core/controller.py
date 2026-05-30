@@ -39,7 +39,7 @@ AnswerMode = Literal["short", "context"]
 
 
 def _friendly_error(exc: BaseException) -> str:
-    """Translate common provider errors into a one-line actionable hint."""
+    """Translate common DeepSeek errors into a one-line actionable hint."""
     cls = type(exc).__name__
     msg = str(exc)
     low = msg.lower()
@@ -52,26 +52,22 @@ def _friendly_error(exc: BaseException) -> str:
         or "11001" in msg
     ):
         return (
-            "DNS lookup failed - cannot reach the AI provider. "
+            "DNS lookup failed - cannot reach api.deepseek.com. "
             "Check your WiFi / corporate firewall."
         )
     if "403" in msg or cls == "PermissionDeniedError" or "access denied" in low:
-        return "Provider blocked the request (HTTP 403). Check your API key in Settings -> AI Provider."
+        return "DeepSeek blocked the request (HTTP 403). Check your API key in Settings -> AI Provider."
     if "401" in msg or cls == "AuthenticationError" or "invalid api key" in low:
-        return "API key is invalid or revoked. Check Settings -> AI Provider."
+        return "DeepSeek API key is invalid or revoked. Check Settings -> AI Provider."
     if "429" in msg or cls == "RateLimitError" or "rate limit" in low or "quota" in low:
-        return (
-            "Rate limit / out of tokens. If you're on Groq's free tier you may have "
-            "run out - switch the LLM (and STT) backend to DeepSeek/local in "
-            "Settings -> AI Provider, or wait and retry."
-        )
+        return "DeepSeek rate limit / quota hit. Wait a moment and try again."
     if (
         cls in ("APIConnectionError", "ConnectionError", "ConnectError",
                 "ConnectTimeout", "ReadTimeout", "TimeoutException")
         or "connection" in low
         or "timed out" in low
     ):
-        return "Network error reaching the AI provider. Check your internet."
+        return "Network error reaching DeepSeek. Check your internet."
     return f"{cls}: {msg}"[:200]
 
 
@@ -84,13 +80,11 @@ class Controller(QObject):
     error = pyqtSignal(str)
     status = pyqtSignal(str)
     history_changed = pyqtSignal(int)  # current turn count
-    # Ground-truth backend report for the answer that just ran:
+    # Ground-truth report for the answer that just ran:
     #   (stt_label, llm_label, fell_back)
-    # This reflects what ACTUALLY served the answer - including silent
-    # fallback (Groq out of tokens -> DeepSeek) and the fact that
-    # continuous mode always transcribes locally - NOT merely what's
-    # selected in Settings. ``fell_back`` is True when the engine that
-    # ran differs from the one the user selected.
+    # stt_label is "local (continuous)" or "local (on-press)"; llm_label
+    # is "DeepSeek". fell_back is always False in this build (no backend
+    # switching) but kept so the overlay badge slot is unchanged.
     backend_used = pyqtSignal(str, str, bool)
 
     def __init__(
@@ -127,60 +121,9 @@ class Controller(QObject):
         # transcript segment already consumed". -1 means "first press,
         # take everything currently buffered".
         self._last_seq: int = -1
-        # Count of presses where the local background STT was lagging
-        # (backlog > threshold). After enough hits we AUTO-SWITCH to
-        # cloud STT (see _maybe_auto_switch_stt) to break the
-        # CPU-saturation / runaway-backlog feedback loop without the user
-        # having to open Settings mid-interview.
-        self._slow_stt_hits: int = 0
-        # Set True once we've auto-switched so we don't do it repeatedly.
-        self._auto_switched_stt: bool = False
-        # Optional hook set by main.py: called after the controller
-        # mutates settings (e.g. auto-switch) so the app can persist
-        # config.json and stop the now-unneeded background thread. Keeps
-        # the controller decoupled from save_settings / the transcriber
-        # lifecycle owned by main.
-        self.on_settings_mutated = None
 
     def _continuous_active(self) -> bool:
         return bool(self.transcriber) and bool(self.settings.continuous_stt)
-
-    def _maybe_auto_switch_stt(self) -> None:
-        """If the local background STT keeps lagging and a Groq key is
-        available, automatically flip to cloud STT + disable continuous
-        mode. This is the decisive fix for slow CPUs: rather than only
-        suggesting it, we DO it, so answers stop tracking stale questions
-        and the CPU stops being pegged by an unwinnable local transcribe
-        loop.
-
-        Guarded so it happens at most once per session and only when
-        cloud is actually usable.
-        """
-        if self._auto_switched_stt:
-            return
-        if self._slow_stt_hits < 3:
-            return
-        if not self.settings.groq_api_key:
-            return  # no cloud fallback available; keep nudging via status
-        self._auto_switched_stt = True
-        self.settings.stt_backend = "cloud"
-        self.settings.continuous_stt = False
-        self.status.emit(
-            "Local STT was lagging - auto-switched to Cloud turbo (Groq) "
-            "for instant, accurate transcription."
-        )
-        print(
-            "[controller] AUTO-SWITCH: local STT lagged 3x with a Groq key "
-            "present -> stt_backend='cloud', continuous_stt=False.",
-            flush=True,
-        )
-        # Let main.py persist the change and stop the background thread.
-        cb = self.on_settings_mutated
-        if callable(cb):
-            try:
-                cb()
-            except Exception:
-                traceback.print_exc()
 
     def apply_continuous_setting(self) -> None:
         """Start or stop the background transcriber to match the current
@@ -272,47 +215,25 @@ class Controller(QObject):
         zero-arg callable that advances the seq marker - called only on a
         successful answer, mirroring the on-press path's marker advance.
 
-        Backlog guard: if the local model has fallen behind real time
-        (common on slower CPUs with large-v3-turbo), the accumulated
-        segments are STALE - reading them would answer a question from
-        many seconds ago. When the backlog exceeds a small threshold we
-        bypass the queue and transcribe a TIGHT most-recent window
-        directly, so the answer reflects the question JUST asked rather
-        than a blend of the last several.
+        Backlog guard: if the local model has fallen behind real time,
+        the accumulated segments are STALE - reading them would answer a
+        question from many seconds ago. When the backlog exceeds a small
+        threshold we bypass the queue and transcribe a TIGHT most-recent
+        window directly (last-utterance isolated), so the answer reflects
+        the question JUST asked.
         """
         t = self.transcriber
         backlog = t.backlog_seconds()
-        # Threshold: a couple of poll cycles + one chunk. Above this the
-        # queue is meaningfully behind the present.
         if backlog > 6.0:
-            self._slow_stt_hits += 1
-            # Tight window: one question is rarely more than ~18s. Using
-            # the full max_capture here would blend 2-3 questions into
-            # one stale transcript (the bug seen in the field logs).
             cap = min(self.settings.max_capture_seconds, 18.0)
-            # Prefer a FAST engine for this synchronous press-time call.
-            # If a Groq key is configured, Groq cloud STT (216x realtime)
-            # turns this into a sub-second call instead of blocking on the
-            # slow local model that already fell behind. Falls back to the
-            # local background engine if cloud can't be built.
-            fast = None
-            try:
-                if self.settings.groq_api_key and hasattr(self.whisper, "_get_cloud"):
-                    fast = self.whisper._get_cloud()
-            except Exception:
-                fast = None
-            text = t.transcribe_recent(cap, engine=fast)
+            text = t.transcribe_recent(cap)
             text = self._clean_transcript(text)
             latest_seq = t.current_seq()
 
             def commit():
                 self._last_seq = latest_seq
 
-            via = "cloud" if fast is not None else "local"
-            # If the local background loop keeps falling behind, auto-switch
-            # to cloud STT (one time) to break the lag feedback loop.
-            self._maybe_auto_switch_stt()
-            label = f"continuous RECENT via {via} (backlog was {backlog:.0f}s)"
+            label = f"continuous RECENT (backlog was {backlog:.0f}s)"
             return text, label, commit
 
         # Normal path: nudge the worker to flush the last partial chunk
@@ -372,9 +293,6 @@ class Controller(QObject):
                     )
                     return
                 captured_seconds = 0.0  # STT happened in the background
-                # Continuous transcription ALWAYS runs on the local model,
-                # regardless of the cloud/local setting - so report it
-                # honestly as local (background).
                 stt_label = "local (continuous)"
             else:
                 # Classic on-press path.
@@ -385,16 +303,15 @@ class Controller(QObject):
                     )
                     return
                 captured_seconds = audio.size / self.whisper.samplerate
-                transcript = self.whisper.transcribe(audio)
+                # isolate_last: transcribe only the interviewer's last
+                # question (~5-8s) instead of the whole window - the big
+                # local-STT latency win.
+                transcript = self.whisper.transcribe(audio, isolate_last=True)
                 transcript = self._clean_transcript(transcript)
                 if not transcript:
                     self.error.emit("No speech detected in the captured window.")
                     return
-                # Ground truth: which STT engine actually transcribed it
-                # (STTRouter sets last_used; may differ from the setting
-                # if the primary backend failed and it fell back).
-                used = getattr(self.whisper, "last_used", "") or self.settings.stt_backend
-                stt_label = "cloud (Groq)" if used == "cloud" else "local"
+                stt_label = "local (on-press)"
 
             self.transcript_ready.emit(transcript)
             print(
@@ -412,9 +329,7 @@ class Controller(QObject):
             # ``context`` -> last 5 Q+A pairs as chat history.
             prior = self.history.as_messages() if mode == "context" else []
             print(
-                f"[answer] llm_backend={self.settings.llm_backend} "
-                f"stt_backend={self.settings.stt_backend} mode={mode} "
-                f"history_turns_sent={len(prior)//2}",
+                f"[answer] mode={mode} history_turns_sent={len(prior)//2}",
                 flush=True,
             )
 
@@ -432,11 +347,7 @@ class Controller(QObject):
                 err_msg = _friendly_error(e)
 
             full = "".join(chunks).strip()
-            # Ground truth: which LLM actually produced the answer. The
-            # LLMRouter sets last_used to the provider that streamed the
-            # first token (may be the fallback if the primary errored).
-            llm_used = getattr(llm, "last_used", "") or self.settings.llm_backend
-            llm_label = "Groq" if llm_used == "groq" else "DeepSeek"
+            llm_label = "DeepSeek"
             print(
                 f"[answer] streamed {len(chunks)} chunks, "
                 f"{len(full)} chars, err={err_msg!r}",
@@ -451,9 +362,8 @@ class Controller(QObject):
                 fallback = f"\u26a0  {err_msg}"
             elif not full:
                 fallback = (
-                    "\u26a0  The LLM returned an empty response. "
-                    "Check your API key / quota / model name in Settings -> AI Provider, "
-                    "or switch to a different provider."
+                    "\u26a0  DeepSeek returned an empty response. "
+                    "Check your API key / quota / model name in Settings -> AI Provider."
                 )
             elif full.upper() == "SKIP":
                 fallback = (
@@ -468,23 +378,12 @@ class Controller(QObject):
 
             self.answer_finished.emit()
 
-            # Emit the ground-truth backend report so the overlay badge
-            # reflects what ACTUALLY ran (incl. silent fallback), not just
-            # the Settings selection. Compute whether either engine
-            # differs from what the user selected.
-            stt_fell_back = (
-                not self._continuous_active()
-                and (getattr(self.whisper, "last_used", "") or self.settings.stt_backend)
-                != self.settings.stt_backend
-            )
-            llm_fell_back = (
-                (getattr(llm, "last_used", "") or self.settings.llm_backend)
-                != self.settings.llm_backend
-            )
-            self.backend_used.emit(stt_label, llm_label, stt_fell_back or llm_fell_back)
+            # Report which engines ran (always local STT + DeepSeek in
+            # this build). fell_back is always False - kept for the
+            # overlay badge slot's signature.
+            self.backend_used.emit(stt_label, llm_label, False)
             print(
-                f"[answer] BACKENDS USED -> STT: {stt_label} | LLM: {llm_label}"
-                + ("  (FELL BACK from selection)" if (stt_fell_back or llm_fell_back) else ""),
+                f"[answer] BACKENDS USED -> STT: {stt_label} | LLM: {llm_label}",
                 flush=True,
             )
 

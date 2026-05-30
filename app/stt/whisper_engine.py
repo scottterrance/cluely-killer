@@ -1,4 +1,4 @@
-"""faster-whisper wrapper.
+"""faster-whisper wrapper (local, offline).
 
 Built-in Silero VAD handles low-volume / whispered speech; beam_size=1
 keeps latency low. English-only is enforced for speed.
@@ -17,13 +17,20 @@ HuggingFace's cache+revision machinery. Two reasons:
 
 setup-model.ps1 prepares ./models/whisper-<size>/ as a flat directory.
 
+SPEED
+-----
+On CPU, faster-whisper latency is roughly LINEAR in audio length. The
+two biggest local-STT speedups are therefore:
+  * ``cpu_threads`` - use all physical cores for the CTranslate2 backend.
+  * Transcribing only the relevant audio. ``transcribe(audio,
+    isolate_last=True)`` isolates just the interviewer's last utterance
+    (see app/stt/audio_proc.py), cutting on-press transcription time 2-4x.
+
 ACCURACY BIASING
 ----------------
-``set_bias()`` feeds a glossary of the candidate's own terms (extracted
-from resume / JD / about-me) into Whisper's ``initial_prompt`` and, when
-the installed faster-whisper supports it, ``hotwords``. This lowers word
-error rate on the proper nouns and tech jargon that dominate interview
-mistakes. See app/stt/biasing.py.
+``set_bias()`` feeds a glossary of the candidate's own terms (resume /
+JD / about-me) into Whisper's ``initial_prompt`` and, when supported,
+``hotwords`` - lowering word error on proper nouns / jargon.
 """
 from __future__ import annotations
 
@@ -34,6 +41,8 @@ from pathlib import Path
 
 import numpy as np
 from faster_whisper import WhisperModel
+
+from .audio_proc import isolate_last_utterance
 
 
 def _bundled_model_path(model_size: str) -> Path:
@@ -53,6 +62,16 @@ def _bundled_model_path(model_size: str) -> Path:
     return base / "models" / f"whisper-{model_size}"
 
 
+def _default_cpu_threads() -> int:
+    """Use all physical-ish cores, capped to keep one free for the UI /
+    audio capture threads. 0 lets CTranslate2 decide; we pick an explicit
+    value so a busy machine still dedicates real parallelism to STT.
+    """
+    n = os.cpu_count() or 4
+    # Leave 1 core for Qt + the WASAPI capture thread; floor at 2.
+    return max(2, n - 1)
+
+
 class WhisperEngine:
     def __init__(
         self,
@@ -60,6 +79,7 @@ class WhisperEngine:
         device: str = "cpu",
         compute_type: str = "int8",
         allow_auto_download: bool = False,
+        cpu_threads: int = 0,
     ):
         self.samplerate = 16000
         self._initial_prompt: str | None = None
@@ -99,7 +119,14 @@ class WhisperEngine:
                 f"See README / setup-model.ps1 for how to download it once."
             )
 
-        self.model = WhisperModel(target, device=device, compute_type=compute_type)
+        threads = cpu_threads if cpu_threads and cpu_threads > 0 else _default_cpu_threads()
+        print(f"[whisper] using cpu_threads={threads} (device={device}, compute={compute_type})", flush=True)
+        self.model = WhisperModel(
+            target,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=threads,
+        )
 
         # faster-whisper >= 1.0 added a `hotwords` kwarg to transcribe();
         # detect it once so we degrade gracefully on older installs.
@@ -119,7 +146,7 @@ class WhisperEngine:
         from .biasing import build_initial_prompt
 
         self._initial_prompt = build_initial_prompt(keywords)
-        # hotwords wants a plain space/comma-joined phrase string.
+        # hotwords wants a plain comma-joined phrase string.
         self._hotwords = ", ".join(keywords) if keywords else None
         n = len(keywords)
         print(
@@ -129,11 +156,16 @@ class WhisperEngine:
         )
 
     # ------------------------------------------------------------------
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, isolate_last: bool = False) -> str:
         if audio is None or audio.size < self.samplerate * 0.5:
             return ""
-        # Whisper expects float32 in [-1, 1].
         audio = audio.astype(np.float32, copy=False)
+        # On the press path, isolate just the interviewer's last question
+        # so Whisper transcribes ~5-8s instead of the whole window. This
+        # is the biggest local-STT latency win (latency ~ audio length).
+        if isolate_last:
+            audio = isolate_last_utterance(audio, self.samplerate, max_seconds=15.0)
+
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak == 0.0:
             return ""

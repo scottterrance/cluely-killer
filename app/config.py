@@ -3,10 +3,16 @@
 Stored as JSON at ~/.cluely_killer/config.json so it survives reinstalls
 and is not bundled with the repo.
 
-This build is intentionally simple:
-  - Whisper: 'small' only, loaded from the model files bundled next to
-    the .exe (in models/hf-cache/hub/). Zero downloads, ever.
+This build is intentionally simple and fully offline-capable for STT:
+  - Whisper: local 'large-v3-turbo' only, loaded from the model files
+    bundled next to the .exe (models/whisper-large-v3-turbo/). Zero
+    downloads at runtime.
   - LLM: DeepSeek only. Cheap, fast, OpenAI-compatible API.
+
+load_settings() filters out any keys not present on the Settings
+dataclass, so configs written by older builds (which had groq_* /
+llm_backend / stt_backend fields) load cleanly - the obsolete keys are
+simply dropped.
 """
 from __future__ import annotations
 
@@ -20,34 +26,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 @dataclass
 class Settings:
-    # ====================================================================
-    # BACKEND SELECTION
-    # ====================================================================
-    # Which cloud LLM answers questions:
-    #   "groq"     - Groq (fast, free tier). DEFAULT.
-    #   "deepseek" - DeepSeek (cheap, stable). Fall back here when the
-    #                Groq free-tier tokens run out.
-    llm_backend: str = "groq"
-    # Which engine transcribes audio:
-    #   "cloud" - Groq-hosted Whisper large-v3-turbo (fast, needs net,
-    #             uses Groq quota). DEFAULT when a Groq key is present.
-    #   "local" - bundled faster-whisper (offline, uses your CPU). Fall
-    #             back here when Groq tokens run out or you're offline.
-    stt_backend: str = "cloud"
-
-    # ---- Groq (cloud LLM + cloud STT) ----
-    # One free key powers BOTH the chat model and the cloud Whisper STT.
-    # Get it at https://console.groq.com/keys.
-    groq_api_key: str = ""
-    # Chat model. 'llama-3.3-70b-versatile' is a strong default; use
-    # 'llama-3.1-8b-instant' for max speed, or a gpt-oss model for more
-    # quality. Must be a model your Groq account can access.
-    groq_model: str = "llama-3.3-70b-versatile"
-    # Cloud STT model hosted on Groq.
-    groq_stt_model: str = "whisper-large-v3-turbo"
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-
-    # ---- DeepSeek (cloud LLM fallback) ----
+    # ---- LLM (DeepSeek - the only provider) ----
     # Get a key at https://platform.deepseek.com/api_keys.
     # Pricing ~$0.14/M input + $0.28/M output for deepseek-chat,
     # so a typical interview Q+A is well under a tenth of a cent.
@@ -59,16 +38,18 @@ class Settings:
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
 
-    # ---- Speech-to-Text (faster-whisper) ----
+    # ---- Speech-to-Text (local faster-whisper, offline) ----
     # 'large-v3-turbo' is a pruned large-v3 (decoder layers 32 -> 4):
     # markedly more accurate than 'small' - especially on names and
-    # technical jargon - while staying fast enough for interview-length
-    # clips at int8 on CPU. Model files are bundled next to the .exe
-    # (in models/whisper-large-v3-turbo/), so the end user never sees a
-    # download. ~1.6 GB on disk at int8.
+    # technical jargon. Model files are bundled next to the .exe (in
+    # models/whisper-large-v3-turbo/), so the end user never sees a
+    # download. ~1.5 GB on disk at int8.
     whisper_model: str = "large-v3-turbo"
     whisper_compute: str = "int8"
     whisper_device: str = "cpu"
+    # CTranslate2 worker threads. 0 = auto (all cores minus one). Raising
+    # this is the simplest local-STT speedup on a multi-core CPU.
+    whisper_cpu_threads: int = 0
     # SAFETY: when False (the default, and what every .exe ships with),
     # WhisperEngine refuses to download a missing model at runtime and
     # raises a clear "place the files here" error instead. Set True only
@@ -179,16 +160,6 @@ def load_settings() -> Settings:
             if s.whisper_model == "small":
                 s.whisper_model = "large-v3-turbo"
                 print("[config] migrated whisper_model 'small' -> 'large-v3-turbo'")
-            # NOTE: we intentionally do NOT auto-downgrade the backend
-            # here based on which API keys are present. An earlier
-            # version moved key-less configs to deepseek/local, but that
-            # mis-fired for users whose Groq key comes from .env (which
-            # is applied in main.py AFTER this function runs) - they were
-            # silently forced onto DeepSeek/local despite having a valid
-            # Groq key. The LLM/STT routers already fall back to the
-            # other backend at call time if the selected one errors, so
-            # honoring the user's explicit selection here is both correct
-            # and safe.
             return s
         except Exception as e:
             print(f"[config] failed to load, using defaults: {e}")
