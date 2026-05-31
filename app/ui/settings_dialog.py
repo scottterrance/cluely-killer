@@ -182,6 +182,20 @@ class SettingsDialog(QDialog):
             "replays the last 5 Q&A word-for-word.</i>"
         ))
 
+        # Semantic cache: reuse answers for repeated questions (instant).
+        self.semcache_check = QCheckBox(
+            "Reuse answers to repeated questions (instant, no LLM call)"
+        )
+        self.semcache_check.setChecked(self.settings.semantic_cache_enabled)
+        f.addRow(self.semcache_check)
+        f.addRow(QLabel(
+            "<i>Common questions ('tell me about yourself', 'why this company') "
+            "recur a lot. The first time, the answer is generated and saved; "
+            "after that a near-identical question is answered <b>instantly</b> "
+            "from the cache - no LLM wait. Affects key '1' only; clears "
+            "automatically when your resume/JD/context changes.</i>"
+        ))
+
         f.addRow(QLabel(
             "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
             "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
@@ -497,6 +511,13 @@ class SettingsDialog(QDialog):
         )
         self.bias_check.setChecked(self.settings.stt_bias_enabled)
 
+        # Audio preprocessing toggle (roadmap #6): clean the signal
+        # before Whisper (high-pass + denoise + gain).
+        self.preprocess_check = QCheckBox(
+            "Clean audio before transcription (rumble removal + denoise + gain)"
+        )
+        self.preprocess_check.setChecked(self.settings.audio_preprocess)
+
         f.addRow("Whisper model:", self.model_combo)
         f.addRow("Device:", self.device_combo)
         f.addRow("CPU threads (0 = auto):", self.cpu_threads_spin)
@@ -504,6 +525,7 @@ class SettingsDialog(QDialog):
         f.addRow("Max capture per press (sec):", self.max_capture_spin)
         f.addRow(self.continuous_check)
         f.addRow(self.bias_check)
+        f.addRow(self.preprocess_check)
         f.addRow(QLabel(
             "<i><b>Device = GPU</b> is the big speed win: it transcribes "
             "large-v3-turbo in well under a second. Needs an NVIDIA GPU + the "
@@ -573,6 +595,7 @@ class SettingsDialog(QDialog):
         s.speculative_enabled = self.speculative_check.isChecked()
         s.use_rag = self.rag_check.isChecked()
         s.context_mode = self.context_mode_combo.currentData() or "smart"
+        s.semantic_cache_enabled = self.semcache_check.isChecked()
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()
@@ -586,6 +609,7 @@ class SettingsDialog(QDialog):
         s.max_capture_seconds = float(self.max_capture_spin.value())
         s.continuous_stt = self.continuous_check.isChecked()
         s.stt_bias_enabled = self.bias_check.isChecked()
+        s.audio_preprocess = self.preprocess_check.isChecked()
         # buffer_seconds must always exceed max_capture_seconds. Bump
         # it here so the Audio tab can't get persisted into a state
         # where the next app start would silently drop audio.

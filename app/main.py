@@ -192,6 +192,28 @@ def main() -> None:
             transcriber.set_bias(vocab)
 
     _refresh_whisper_bias()
+    # Roadmap #6: apply the audio-cleanup flag to the engine.
+    whisper.set_preprocess(settings.audio_preprocess)
+
+    # ---- Semantic cache (roadmap #8) ----
+    # Reuse answers for repeated short-mode questions. Fingerprinted with
+    # the candidate context so it auto-invalidates when resume/JD/etc.
+    # change.
+    from .core.semantic_cache import SemanticCache, context_fingerprint
+
+    semantic_cache = SemanticCache(threshold=settings.semantic_cache_threshold)
+
+    def _refresh_cache_fingerprint() -> None:
+        fp = context_fingerprint(
+            settings.resume_text,
+            settings.job_description,
+            settings.about_me,
+            settings.custom_system_prompt,
+            settings.answer_brevity,
+        )
+        semantic_cache.set_fingerprint(fp)
+
+    _refresh_cache_fingerprint()
 
     # ---- Orchestration ----
     _say("wiring controller, prompts, providers...")
@@ -251,6 +273,7 @@ def main() -> None:
         prompt_builder=_prompt_for,
         history=history,
         transcriber=transcriber,
+        semantic_cache=semantic_cache,
     )
     _say("controller ready (memory keeps last 5 Q+A turns).")
 
@@ -277,6 +300,12 @@ def main() -> None:
             # Apply a live toggle of continuous transcription (start/stop
             # the background thread to match the new checkbox state).
             controller.apply_continuous_setting()
+            # Roadmap #6 + #8: apply audio-cleanup flag and re-fingerprint
+            # the semantic cache (context may have changed -> old cached
+            # answers auto-invalidate).
+            whisper.set_preprocess(settings.audio_preprocess)
+            semantic_cache.threshold = settings.semantic_cache_threshold
+            _refresh_cache_fingerprint()
 
     overlay = OverlayWindow(
         settings,

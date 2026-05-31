@@ -1,4 +1,5 @@
-"""Audio pre-processing for STT: silence trimming + last-utterance isolation.
+"""Audio pre-processing for STT: silence trimming + last-utterance isolation
++ signal cleanup (high-pass, AGC, light denoise).
 
 These were originally embedded in the (now-removed) Groq cloud STT engine.
 They matter MORE for the local path: on a CPU, faster-whisper latency is
@@ -7,6 +8,12 @@ question (~5-8 s) instead of the whole capture window (~15-25 s) is the
 single biggest local-STT speedup available - it cuts transcription time
 by 2-4x AND improves accuracy by removing the candidate's own speech.
 
+Roadmap #6 adds ``clean_audio()`` (high-pass filter + automatic gain
+control + spectral-floor denoise). It's a pure-numpy, vectorized chain -
+no scipy/torch - so it adds negligible latency and zero new
+dependencies, and only improves WER on quiet/noisy input. Whisper still
+runs its own VAD; this just hands it a cleaner signal.
+
 All functions operate on mono float32 [-1, 1] numpy arrays.
 """
 from __future__ import annotations
@@ -14,6 +21,122 @@ from __future__ import annotations
 import numpy as np
 
 _FRAME_SECONDS = 0.05  # 50 ms analysis frames
+
+
+def high_pass(audio: np.ndarray, samplerate: int, cutoff_hz: float = 80.0) -> np.ndarray:
+    """Remove low-frequency rumble (AC hum, desk thumps, mic handling).
+
+    Implemented as (signal - low-pass(signal)), where the low-pass is a
+    centered moving average. This is numerically stable for any length
+    (unlike the exponential one-pole 'a^k' trick, which underflows/over-
+    flows on multi-second buffers), O(n) via a cumulative-sum sliding
+    window, vectorized, and needs no scipy.
+
+    The moving-average window length is chosen so its -3 dB point is
+    near ``cutoff_hz`` (window ~ samplerate / cutoff).
+    """
+    if audio is None or audio.size < 4:
+        return audio
+    x = audio.astype(np.float32, copy=False)
+    win = max(3, int(samplerate / max(1.0, cutoff_hz)))
+    if win >= x.size:
+        # Window longer than the clip: just remove the mean (DC).
+        return (x - float(np.mean(x))).astype(np.float32)
+    # Sliding-window mean via prefix sums (odd window, centered).
+    if win % 2 == 0:
+        win += 1
+    half = win // 2
+    # Reflect-pad so the moving average is defined at the edges.
+    padded = np.pad(x.astype(np.float64), half, mode="reflect")
+    csum = np.cumsum(padded)
+    # mean[i] = (csum[i+win] - csum[i]) / win  for i in 0..len(x)-1
+    csum = np.concatenate(([0.0], csum))
+    moving = (csum[win:] - csum[:-win]) / win  # length == x.size
+    out = x - moving[: x.size].astype(np.float32)
+    return out.astype(np.float32)
+
+
+def agc(audio: np.ndarray, target_rms: float = 0.08, max_gain: float = 8.0) -> np.ndarray:
+    """Automatic gain control: normalize toward a target RMS.
+
+    A quiet interviewer and a loud one both arrive at a consistent level,
+    which helps Whisper. Gain is capped so we don't blow up pure noise,
+    and the result is soft-clipped to stay within [-1, 1].
+    """
+    if audio is None or audio.size == 0:
+        return audio
+    cur = rms(audio)
+    if cur < 1e-6:
+        return audio  # essentially silence; don't amplify hiss
+    gain = min(max_gain, target_rms / cur)
+    if gain <= 1.01:
+        return audio  # already loud enough
+    out = audio.astype(np.float32, copy=False) * gain
+    # Soft clip (tanh) only if we'd exceed unity, to avoid harsh edges.
+    peak = float(np.max(np.abs(out))) if out.size else 0.0
+    if peak > 1.0:
+        out = np.tanh(out).astype(np.float32)
+    return out
+
+
+def denoise(audio: np.ndarray, samplerate: int, strength: float = 0.6) -> np.ndarray:
+    """Light spectral-floor denoise (Wiener-style, time-domain framing).
+
+    Estimates a noise floor from the quietest frames and attenuates
+    frames near that floor, leaving speech frames intact. This is a cheap
+    approximation of spectral subtraction that needs no FFT/scipy and is
+    safe (never removes speech, just softens steady background hiss).
+    ``strength`` in [0,1] scales how aggressively low-energy frames are
+    attenuated.
+    """
+    if audio is None or audio.size == 0:
+        return audio
+    strength = float(min(1.0, max(0.0, strength)))
+    if strength <= 0.0:
+        return audio
+    rms_frames, frame = _frame_rms(audio, samplerate)
+    if rms_frames.size < 4:
+        return audio
+    # Noise floor = 20th percentile frame energy; speech ref = 90th.
+    noise = float(np.percentile(rms_frames, 20))
+    speech = float(np.percentile(rms_frames, 90))
+    if speech <= noise or speech < 1e-6:
+        return audio
+    # Per-frame gain: ~1 for speech-level frames, ~ (1-strength) for
+    # noise-level frames, smoothly interpolated (Wiener-like ratio).
+    ratio = (rms_frames - noise) / (speech - noise)
+    ratio = np.clip(ratio, 0.0, 1.0)
+    gains = (1.0 - strength) + strength * ratio  # in [1-strength, 1]
+    n_frames = rms_frames.size
+    out = audio.astype(np.float32, copy=True)
+    # Apply per-frame gain to the framed region; tail (partial frame)
+    # left untouched.
+    framed = out[: n_frames * frame].reshape(n_frames, frame)
+    framed *= gains[:, None].astype(np.float32)
+    return out
+
+
+def clean_audio(
+    audio: np.ndarray,
+    samplerate: int,
+    *,
+    hpf_cutoff_hz: float = 80.0,
+    agc_target_rms: float = 0.08,
+    denoise_strength: float = 0.5,
+) -> np.ndarray:
+    """Full cleanup chain for STT input: high-pass -> denoise -> AGC.
+
+    Order matters: HPF first removes rumble so the noise-floor estimate
+    in denoise() isn't skewed by low-frequency energy; AGC last so the
+    final level is normalized after noise has been attenuated. Pure
+    numpy, vectorized, no new deps. Safe no-op on empty/tiny input.
+    """
+    if audio is None or audio.size < samplerate // 10:  # <100 ms
+        return audio
+    x = high_pass(audio, samplerate, hpf_cutoff_hz)
+    x = denoise(x, samplerate, denoise_strength)
+    x = agc(x, target_rms=agc_target_rms)
+    return x.astype(np.float32, copy=False)
 
 
 def rms(audio: np.ndarray) -> float:

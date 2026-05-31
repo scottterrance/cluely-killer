@@ -62,6 +62,14 @@ class _Speculation:
     started_at: float = 0.0
 
 
+def _chunk_text(text: str, size: int = 24):
+    """Yield a string in small slices so a cached/instant answer still
+    streams into the UI naturally (instead of appearing all at once).
+    """
+    for i in range(0, len(text), size):
+        yield text[i : i + size]
+
+
 def _friendly_error(exc: BaseException) -> str:
     """Translate common DeepSeek errors into a one-line actionable hint."""
     cls = type(exc).__name__
@@ -121,6 +129,7 @@ class Controller(QObject):
         prompt_builder: Callable[..., str],
         history: ConversationHistory,
         transcriber=None,
+        semantic_cache=None,
     ):
         super().__init__()
         self.settings = settings
@@ -130,6 +139,9 @@ class Controller(QObject):
         self.scheduler = scheduler
         self.prompt_builder = prompt_builder
         self.history = history
+        # Optional SemanticCache (roadmap #8): reuse answers for repeated
+        # short-mode questions. None disables the feature entirely.
+        self.semantic_cache = semantic_cache
         # Optional ContinuousTranscriber (Phase 2). When present AND
         # settings.continuous_stt is on, answers read the pre-built
         # background transcript instead of transcribing on the press.
@@ -561,6 +573,31 @@ class Controller(QObject):
             if claimed_spec is None:
                 self._cancel_spec("superseded by fresh press")
 
+            # SEMANTIC CACHE (roadmap #8): for a fresh short-mode answer,
+            # check whether we've already answered a near-identical
+            # question for this same context. On a hit, serve the saved
+            # answer instantly - no LLM call. Skipped when a spec was
+            # claimed (already instant) and for context mode (mode '2'
+            # follow-ups depend on the live conversation).
+            cache_hit_answer: str | None = None
+            if (
+                claimed_spec is None
+                and mode == "short"
+                and self.semantic_cache is not None
+                and self.settings.semantic_cache_enabled
+            ):
+                try:
+                    hit = self.semantic_cache.lookup(transcript)
+                except Exception:
+                    hit = None
+                if hit is not None:
+                    cache_hit_answer, score = hit
+                    print(
+                        f"[semcache] HIT score={score:.2f} -> serving cached "
+                        f"answer ({len(cache_hit_answer)} chars), no LLM call",
+                        flush=True,
+                    )
+
             self.answer_started.emit()
             chunks: list[str] = []
             err_msg: str | None = None
@@ -569,7 +606,11 @@ class Controller(QObject):
             llm_t0 = time.monotonic()
             ttft: float | None = None
             try:
-                if claimed_spec is not None:
+                if cache_hit_answer is not None:
+                    # Serve the cached answer in a few chunks so the UI
+                    # streams it naturally. Zero network / LLM cost.
+                    stream = _chunk_text(cache_hit_answer)
+                elif claimed_spec is not None:
                     # Replay the pre-generated chunks (instant), then
                     # live-stream any remainder until the worker finishes.
                     stream = self._drain_spec(claimed_spec)
@@ -589,7 +630,7 @@ class Controller(QObject):
             llm_total = time.monotonic() - llm_t0
 
             full = "".join(chunks).strip()
-            llm_label = "DeepSeek"
+            llm_label = "cache" if cache_hit_answer is not None else "DeepSeek"
             print(
                 f"[answer] streamed {len(chunks)} chunks, "
                 f"{len(full)} chars, err={err_msg!r}",
@@ -657,6 +698,21 @@ class Controller(QObject):
                 # ``context`` presses can rely on it.
                 self.history.add(transcript, full)
                 self.history_changed.emit(len(self.history))
+                # Populate the semantic cache from a FRESH short-mode
+                # answer (not from a cache hit - that would be a no-op,
+                # and not from context mode - those answers are
+                # conversation-specific). Future near-identical questions
+                # will be served instantly.
+                if (
+                    mode == "short"
+                    and cache_hit_answer is None
+                    and self.semantic_cache is not None
+                    and self.settings.semantic_cache_enabled
+                ):
+                    try:
+                        self.semantic_cache.add(transcript, full)
+                    except Exception:
+                        pass
                 self.status.emit("Ready")
             else:
                 self.status.emit("See answer panel - non-success outcome.")

@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 from faster_whisper import WhisperModel
 
-from .audio_proc import isolate_last_utterance
+from .audio_proc import clean_audio, isolate_last_utterance
 
 
 def _bundled_model_path(model_size: str) -> Path:
@@ -133,6 +133,9 @@ class WhisperEngine:
         self.samplerate = 16000
         self._initial_prompt: str | None = None
         self._hotwords: str | None = None
+        # Roadmap #6: when True, run the HPF+denoise+AGC cleanup chain on
+        # audio before transcription. Set from settings via set_preprocess().
+        self._preprocess = False
 
         # Prefer the flat bundled directory if it has a model.bin in it.
         bundled = _bundled_model_path(model_size)
@@ -240,6 +243,12 @@ class WhisperEngine:
         )
 
     # ------------------------------------------------------------------
+    def set_preprocess(self, enabled: bool) -> None:
+        """Enable/disable the audio-cleanup chain (HPF+denoise+AGC)."""
+        self._preprocess = bool(enabled)
+        print(f"[whisper] audio preprocessing {'ON' if self._preprocess else 'OFF'}", flush=True)
+
+    # ------------------------------------------------------------------
     def transcribe(self, audio: np.ndarray, isolate_last: bool = False) -> str:
         if audio is None or audio.size < self.samplerate * 0.5:
             return ""
@@ -249,6 +258,12 @@ class WhisperEngine:
         # is the biggest local-STT latency win (latency ~ audio length).
         if isolate_last:
             audio = isolate_last_utterance(audio, self.samplerate, max_seconds=15.0)
+
+        # Roadmap #6: clean the signal (rumble removal + denoise + gain)
+        # AFTER isolating the utterance (so the noise-floor estimate is
+        # taken over the relevant span) and BEFORE the peak check below.
+        if self._preprocess:
+            audio = clean_audio(audio, self.samplerate)
 
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak == 0.0:

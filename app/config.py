@@ -63,6 +63,26 @@ class Settings:
     #             continuity, more tokens).
     context_mode: str = "smart"
 
+    # ---- Semantic cache (roadmap #8) ----
+    # Reuse previously-generated answers for repeated/near-duplicate
+    # interview questions ("tell me about yourself", etc). On a hit the
+    # answer is served instantly with NO LLM call. Auto-populated from
+    # successful short-mode answers; persisted to semantic_cache.json;
+    # auto-invalidated when the candidate context (resume/JD/about/custom/
+    # brevity) changes. Only affects mode '1' (short) - mode '2' follow-ups
+    # depend on live conversation and always generate fresh.
+    semantic_cache_enabled: bool = True
+    # Cosine-similarity threshold (0-1) for a cache hit. Higher = stricter
+    # (only near-identical questions reuse an answer). 0.82 is a good
+    # balance: paraphrases hit, different questions don't.
+    semantic_cache_threshold: float = 0.82
+
+    # ---- Audio preprocessing (roadmap #6) ----
+    # Clean the captured audio before transcription: high-pass (rumble
+    # removal) + light denoise + automatic gain control. Improves Whisper
+    # accuracy on quiet/noisy input. Pure-numpy, negligible latency.
+    audio_preprocess: bool = True
+
     # ---- Speech-to-Text (local faster-whisper, offline) ----
     # 'large-v3-turbo' is a pruned large-v3 (decoder layers 32 -> 4):
     # markedly more accurate than 'small' - especially on names and
