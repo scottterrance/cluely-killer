@@ -118,7 +118,7 @@ class Controller(QObject):
         whisper: WhisperEngine,
         llm_factory: Callable[[Settings], LLMProvider],
         scheduler: ExampleScheduler,
-        prompt_builder: Callable[[Settings, bool], str],
+        prompt_builder: Callable[..., str],
         history: ConversationHistory,
         transcriber=None,
     ):
@@ -383,7 +383,11 @@ class Controller(QObject):
         """Background worker: stream a short-mode answer into ``spec``."""
         try:
             include_example = False  # keep speculation cheap/deterministic
-            system_prompt = self.prompt_builder(self.settings, include_example)
+            # Short-mode: no brief (no prior context), but pass the
+            # question so the prompt builder can inject RAG snippets.
+            system_prompt = self.prompt_builder(
+                self.settings, include_example, spec.transcript, ""
+            )
             llm = self.llm_factory(self.settings)
             t0 = time.monotonic()
             for chunk in llm.stream_chat(system_prompt, spec.transcript, prior_messages=[]):
@@ -531,13 +535,22 @@ class Controller(QObject):
 
             self.status.emit(f"Thinking ({mode})...")
             include_example = self.scheduler.should_include()
-            system_prompt = self.prompt_builder(self.settings, include_example)
-            # The mode picks whether prior turns are shipped to the LLM.
-            # ``short``  -> isolated answer, no follow-up gravity.
-            # ``context`` -> last 5 Q+A pairs as chat history.
-            prior = self.history.as_messages() if mode == "context" else []
+            # Context for mode '2': either a compact rolling BRIEF
+            # ("smart") or the full raw last-5 Q+A messages ("full").
+            # Mode '1' (short) stays pure - no prior context at all.
+            brief = ""
+            prior: list[dict] = []
+            if mode == "context":
+                if self.settings.context_mode == "full":
+                    prior = self.history.as_messages()
+                else:
+                    brief = self.history.brief()
+            system_prompt = self.prompt_builder(
+                self.settings, include_example, transcript, brief
+            )
             print(
-                f"[answer] mode={mode} history_turns_sent={len(prior)//2} "
+                f"[answer] mode={mode} context_mode={self.settings.context_mode} "
+                f"history_msgs={len(prior)} brief={'y' if brief else 'n'} "
                 f"speculated={claimed_spec is not None}",
                 flush=True,
             )
@@ -590,7 +603,8 @@ class Controller(QObject):
 
             # Decide what to surface. Critical: never leave the answer
             # panel silently empty - the candidate has no idea what
-            # happened otherwise.
+            # happened otherwise. (The model is instructed to NEVER refuse
+            # or output SKIP, so we only handle hard errors / empties.)
             fallback: str | None = None
             if err_msg:
                 fallback = f"\u26a0  {err_msg}"
@@ -598,12 +612,6 @@ class Controller(QObject):
                 fallback = (
                     "\u26a0  DeepSeek returned an empty response. "
                     "Check your API key / quota / model name in Settings -> AI Provider."
-                )
-            elif full.upper() == "SKIP":
-                fallback = (
-                    "\u26a0  The model output 'SKIP' - it judged the transcribed text as not a "
-                    "clear question. Press '1' or '2' again right after the interviewer "
-                    "finishes asking, or press Ctrl+R to reset."
                 )
 
             if fallback:
@@ -629,7 +637,7 @@ class Controller(QObject):
                 flush=True,
             )
 
-            success = not err_msg and full and full.upper() != "SKIP"
+            success = not err_msg and bool(full)
             if success:
                 # Advance the marker BEFORE writing to history. From the
                 # interviewer's clock perspective, "this question is

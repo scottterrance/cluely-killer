@@ -155,6 +155,33 @@ class SettingsDialog(QDialog):
             "on guesses you skip. Needs continuous transcription on.</i>"
         ))
 
+        # RAG: inject only the resume parts relevant to each question
+        # (sharper answers + slightly faster) when the resume is large.
+        self.rag_check = QCheckBox(
+            "Smart resume retrieval (use only the relevant resume parts per question)"
+        )
+        self.rag_check.setChecked(self.settings.use_rag)
+        f.addRow(self.rag_check)
+
+        # Mode '2' memory style: compact brief vs full last-5 transcript.
+        self.context_mode_combo = QComboBox()
+        for label, val in [
+            ("Smart - compact summary of earlier Q&A (faster)", "smart"),
+            ("Full - replay the last 5 Q&A verbatim (most precise)", "full"),
+        ]:
+            self.context_mode_combo.addItem(label, val)
+        ci = self.context_mode_combo.findData(self.settings.context_mode)
+        self.context_mode_combo.setCurrentIndex(ci if ci >= 0 else 0)
+        f.addRow("Key '2' memory:", self.context_mode_combo)
+        f.addRow(QLabel(
+            "<i><b>Smart resume retrieval</b> sends only the 2-3 resume parts "
+            "most relevant to the question (kicks in for longer resumes) so "
+            "answers are specific, not generic.<br>"
+            "<b>Key '2' memory</b> controls how follow-ups remember earlier "
+            "answers: <b>Smart</b> sends a short digest (faster); <b>Full</b> "
+            "replays the last 5 Q&A word-for-word.</i>"
+        ))
+
         f.addRow(QLabel(
             "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
             "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
@@ -544,6 +571,8 @@ class SettingsDialog(QDialog):
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
         s.answer_brevity = self.brevity_combo.currentData() or "concise"
         s.speculative_enabled = self.speculative_check.isChecked()
+        s.use_rag = self.rag_check.isChecked()
+        s.context_mode = self.context_mode_combo.currentData() or "smart"
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()

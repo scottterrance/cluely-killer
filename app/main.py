@@ -201,6 +201,7 @@ def main() -> None:
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
     from .prompts.builder import LENGTH_MAX_TOKENS, ExampleScheduler, build_system_prompt
+    from .core.rag import retrieve_resume_snippets
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
@@ -214,14 +215,29 @@ def main() -> None:
             max_tokens=LENGTH_MAX_TOKENS.get(s.answer_brevity, 110),
         )
 
-    def _prompt_for(s, include_example: bool) -> str:
+    def _prompt_for(s, include_example: bool, question: str = "", brief: str = "") -> str:
+        # RAG: when the resume is large, send only the chunks relevant to
+        # THIS question (volatile tail) and drop the full resume from the
+        # cache-stable prefix. Small resumes are sent whole (cheaper to
+        # cache than to retrieve over).
+        resume_full = s.resume_text or ""
+        resume_for_prefix = resume_full
+        snippets = ""
+        if s.use_rag and question and len(resume_full) >= s.rag_min_chars:
+            snippets = retrieve_resume_snippets(
+                resume_full, question, top_k=3, max_chars=s.rag_snippet_chars
+            )
+            if snippets:
+                resume_for_prefix = ""  # don't also send the whole resume
         return build_system_prompt(
-            resume=s.resume_text,
+            resume=resume_for_prefix,
             job_desc=s.job_description,
             about=s.about_me,
             custom=s.custom_system_prompt,
             include_example=include_example,
             brevity=s.answer_brevity,
+            resume_snippets=snippets,
+            brief=brief,
         )
 
     scheduler = ExampleScheduler()

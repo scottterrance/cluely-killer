@@ -23,24 +23,28 @@ LENGTH_MAX_TOKENS = {"concise": 110, "normal": 220, "detailed": 400}
 
 def _base_instructions(brevity: str) -> str:
     length_rule = _LENGTH_RULES.get(brevity, _LENGTH_RULES["concise"])
-    return f"""You are a real-time interview assistant. The user is the candidate; you generate the candidate's spoken answer to whatever the interviewer just asked.
+    return f"""You are a real-time interview assistant. The user is the candidate; you generate the candidate's spoken answer to whatever the interviewer just said. Your one goal: help the candidate WIN THE JOB.
 
 Hard rules - these are non-negotiable:
 {length_rule}
 - Speak in first person as the candidate ("I", "my").
-- Be confident, natural, conversational. Sound like a smart human, not a textbook or chatbot.
+- Be confident, natural, conversational. Sound like a smart, likeable human - not a textbook or chatbot.
+
+ALWAYS ANSWER - never refuse, never deflect:
+- You MUST produce a real spoken answer to EVERY input, no matter what. Never output "SKIP", "I can't", "I'm not sure what you're asking", "that's not a question", or any meta-comment. Those are forbidden.
+- If the input is vague, garbled, partial, or doesn't look like a question, INTERPRET it as the most likely interview question and answer THAT - confidently. (e.g. fragments about a project -> answer "tell me about that project"; a topic word -> answer "what's your experience with X".) When truly unclear, give a strong, positive, general statement about my fit, motivation, or strengths that moves the conversation forward.
+- Stay POSITIVE and constructive in every answer. Frame weaknesses as growth, gaps as eagerness to learn, hard situations as lessons. Never say anything that hurts my candidacy.
+
+GROUNDING:
+- Use the provided context (my background, relevant resume snippets, the target job) to make answers specific and credible. Prefer real specifics over generic claims. Never invent facts that contradict my resume.
 
 HIGHLIGHTING (this is critical - the candidate glances at it while talking):
 - In EVERY sentence, wrap 2 or 3 of the most STRESSED, main keywords in `==word==` (rendered RED). These are the words the candidate should emphasize when speaking.
 - You may ALSO wrap up to 2 secondary keywords across the whole answer in `**word**` (rendered yellow), used sparingly.
 - Choose the keywords that carry the most meaning - nouns, verbs, numbers, technologies, outcomes - never prepositions or articles.
 
-CONVERSATION CONTINUITY:
-- If prior turns are present (the chat history), assume the new question is a follow-up. Reference earlier specifics naturally instead of repeating my whole story.
-
 OUTPUT:
-- Output ONLY the answer text. No preamble, no "Great question", no headers, no explanation, no quotation marks.
-- If the input is unclear or not a question, output the single word: SKIP
+- Output ONLY the answer text the candidate should say. No preamble, no "Great question", no headers, no explanation, no quotation marks, no meta-commentary.
 """
 
 
@@ -57,6 +61,8 @@ def build_system_prompt(
     custom: str,
     include_example: bool,
     brevity: str = "concise",
+    resume_snippets: str = "",
+    brief: str = "",
 ) -> str:
     # PREFIX-CACHE ORDERING (matters for latency + cost):
     # DeepSeek (and most providers) cache the longest IDENTICAL leading
@@ -64,19 +70,35 @@ def build_system_prompt(
     # cache hit cuts time-to-first-token and is billed ~10x cheaper.
     # So everything that stays CONSTANT within a session goes first:
     #   base rules -> custom -> about-me -> resume -> JD
-    # and the only VOLATILE bit (the every-3rd-turn example toggle) goes
-    # LAST. The base rules vary only with `brevity` (a session-level
-    # setting), so they stay cache-stable within a session.
+    # and only VOLATILE per-question bits go LAST (resume_snippets from
+    # RAG, the rolling brief, the example toggle). The base rules vary
+    # only with `brevity` (a session-level setting), so they stay
+    # cache-stable within a session.
     parts: list[str] = [_base_instructions(brevity)]
     if custom and custom.strip():
         parts.append("\nAdditional instructions from the candidate:\n" + custom.strip())
     if about and about.strip():
         parts.append("\n--- About me ---\n" + about.strip())
+    # When RAG is active the caller passes resume="" (the full resume is
+    # NOT in the stable prefix) and supplies resume_snippets in the tail.
+    # When RAG is off (small resume) the full resume sits here in the
+    # cache-stable prefix.
     if resume and resume.strip():
         parts.append("\n--- My resume ---\n" + resume.strip())
     if job_desc and job_desc.strip():
         parts.append("\n--- Target job ---\n" + job_desc.strip())
-    # Volatile tail - keep this the ONLY thing that varies turn-to-turn.
+
+    # ---- VOLATILE TAIL (changes per question; never cached) ----
+    if resume_snippets and resume_snippets.strip():
+        parts.append(
+            "\n--- Relevant parts of my background for THIS question ---\n"
+            + resume_snippets.strip()
+        )
+    if brief and brief.strip():
+        parts.append(
+            "\n--- Earlier in this interview (for continuity on follow-ups) ---\n"
+            + brief.strip()
+        )
     if include_example:
         parts.append(EXAMPLE_INSTRUCTION)
     return "\n".join(parts)

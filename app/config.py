@@ -45,6 +45,24 @@ class Settings:
     #   "detailed" - 3-5 sentences (~400 token cap). Slowest.
     answer_brevity: str = "concise"
 
+    # ---- Retrieval / context (roadmap #9) ----
+    # RAG over the resume: when the resume is large, inject only the 2-3
+    # chunks most relevant to the current question instead of the whole
+    # thing. Sharper, more credible answers; slightly faster TTFT.
+    use_rag: bool = True
+    # Only apply RAG when the resume exceeds this many characters. Small
+    # resumes are cheap to send whole AND keep DeepSeek's prefix cache
+    # warm, so RAG is skipped below this threshold.
+    rag_min_chars: int = 2500
+    # Char budget for the retrieved snippets injected per question.
+    rag_snippet_chars: int = 700
+    # How mode '2' (context key) supplies prior-turn memory:
+    #   "smart" - a compact rolling BRIEF (digest) of prior Q+A. Cheaper
+    #             token-wise + faster TTFT. Default.
+    #   "full"  - the full raw last-5 Q+A as chat messages (most precise
+    #             continuity, more tokens).
+    context_mode: str = "smart"
+
     # ---- Speech-to-Text (local faster-whisper, offline) ----
     # 'large-v3-turbo' is a pruned large-v3 (decoder layers 32 -> 4):
     # markedly more accurate than 'small' - especially on names and
