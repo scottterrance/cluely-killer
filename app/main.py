@@ -2,6 +2,15 @@
 
 Wires together: settings -> audio capture -> Whisper -> DeepSeek ->
 controller -> overlay -> hotkeys -> stealth.
+
+Enhanced in this version:
+- prompt_builder now receives question_type (QuestionType enum) as a
+  third argument so the adaptive prompt system can inject the right
+  depth instructions per question tier.
+- ConversationHistory max_turns raised to 8 for deeper drill-down sessions.
+- question_type_detected signal wired to the overlay status label so the
+  candidate can see the detected tier (System Design / Technical / etc.)
+  at a glance while the answer streams in.
 """
 from __future__ import annotations
 
@@ -72,11 +81,11 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     class HotkeyDispatcher(QObject):
-        answer_requested = pyqtSignal()
-        toggle_requested = pyqtSignal()
-        clear_requested = pyqtSignal()
+        answer_requested  = pyqtSignal()
+        toggle_requested  = pyqtSignal()
+        clear_requested   = pyqtSignal()
         settings_requested = pyqtSignal()
-        quit_requested = pyqtSignal()
+        quit_requested    = pyqtSignal()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -105,7 +114,7 @@ def main() -> None:
     capture.start()
     _say("audio capture started.")
 
-    # ---- STT (bundled 'small' model, offline) ----
+    # ---- STT (bundled model, offline) ----
     _say(
         f"loading faster-whisper '{settings.whisper_model}' "
         f"({settings.whisper_compute} on {settings.whisper_device}) "
@@ -127,7 +136,7 @@ def main() -> None:
     from .hotkeys.manager import HotkeyManager
     from .llm.base import LLMProvider
     from .llm.deepseek_provider import DeepSeekProvider
-    from .prompts.builder import ExampleScheduler, build_system_prompt
+    from .prompts.builder import ExampleScheduler, QuestionType, build_system_prompt
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
@@ -139,17 +148,19 @@ def main() -> None:
             base_url=s.deepseek_base_url,
         )
 
-    def _prompt_for(s, include_example: bool) -> str:
+    def _prompt_for(s, include_example: bool, question_type: QuestionType | None = None) -> str:
         return build_system_prompt(
             resume=s.resume_text,
             job_desc=s.job_description,
             about=s.about_me,
             custom=s.custom_system_prompt,
             include_example=include_example,
+            question_type=question_type,
         )
 
     scheduler = ExampleScheduler()
-    history = ConversationHistory(max_turns=5)
+    # Raised from 5 to 8 turns to support deep technical drill-down sequences.
+    history = ConversationHistory(max_turns=8)
     controller = Controller(
         settings=settings,
         audio_buffer=buffer,
@@ -159,7 +170,7 @@ def main() -> None:
         prompt_builder=_prompt_for,
         history=history,
     )
-    _say("controller ready (memory keeps last 5 Q+A turns).")
+    _say("controller ready (memory keeps last 8 Q+A turns for deep drill-downs).")
 
     # ---- UI ----
     _say("building overlay window...")
@@ -216,11 +227,11 @@ def main() -> None:
 
     def apply_hotkeys() -> None:
         hotkeys.set_hotkeys({
-            settings.hotkey_answer: dispatcher.answer_requested.emit,
-            settings.hotkey_toggle: dispatcher.toggle_requested.emit,
-            settings.hotkey_clear: dispatcher.clear_requested.emit,
+            settings.hotkey_answer:   dispatcher.answer_requested.emit,
+            settings.hotkey_toggle:   dispatcher.toggle_requested.emit,
+            settings.hotkey_clear:    dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,
-            settings.hotkey_quit: dispatcher.quit_requested.emit,
+            settings.hotkey_quit:     dispatcher.quit_requested.emit,
         })
 
     apply_hotkeys()

@@ -1,9 +1,28 @@
 """faster-whisper wrapper.
 
-Built-in Silero VAD handles low-volume / whispered speech; beam_size=1
-keeps latency low. English-only is enforced for speed.
+Built-in Silero VAD handles low-volume / whispered speech.
+English-only is enforced for speed.
 
-This build loads the model from a flat local directory bundled next
+Model support
+-------------
+This build supports both the bundled 'small' model (offline, ships next
+to the .exe) and the 'large-v3-turbo' model (requires a one-time download
+or manual staging via setup-model.ps1).
+
+  small          : ~466 MB, ~3-5s transcription per 25s clip on CPU.
+                   Bundled offline. Suitable for most interview audio.
+  large-v3-turbo : ~1.5 GB, ~2-4s on GPU / ~8-12s on CPU.
+                   Significantly higher accuracy for accented speech,
+                   technical jargon (algorithm names, framework names),
+                   and overlapping or quiet audio. Recommended when a
+                   GPU is available or accuracy is paramount.
+
+beam_size tuning
+----------------
+  small          : beam_size=1 (greedy, fastest)
+  large-v3-turbo : beam_size=3 (better accuracy, still fast on GPU)
+
+This file loads the model from a flat local directory bundled next
 to the .exe (./models/whisper-<size>/) instead of going through
 HuggingFace's cache+revision machinery. Two reasons:
 
@@ -44,6 +63,18 @@ def _bundled_model_path(model_size: str) -> Path:
     return base / "models" / f"whisper-{model_size}"
 
 
+def _beam_size_for(model_size: str) -> int:
+    """Return the optimal beam size for the given model.
+
+    large-v3-turbo benefits from beam_size=3 for better accuracy on
+    technical vocabulary. Smaller models use beam_size=1 (greedy) for
+    maximum speed.
+    """
+    if "large" in model_size.lower() or "turbo" in model_size.lower():
+        return 3
+    return 1
+
+
 class WhisperEngine:
     def __init__(
         self,
@@ -52,6 +83,8 @@ class WhisperEngine:
         compute_type: str = "int8",
     ):
         self.samplerate = 16000
+        self._model_size = model_size
+        self._beam_size = _beam_size_for(model_size)
 
         # Prefer the flat bundled directory if it has a model.bin in it.
         # Falling back to the model_size string lets dev mode still work
@@ -62,7 +95,8 @@ class WhisperEngine:
         if model_bin.exists():
             print(
                 f"[whisper] loading from bundled local path: {bundled} "
-                f"(model.bin {model_bin.stat().st_size // 1024 // 1024} MB)",
+                f"(model.bin {model_bin.stat().st_size // 1024 // 1024} MB) "
+                f"beam_size={self._beam_size}",
                 flush=True,
             )
             target = str(bundled)
@@ -91,7 +125,7 @@ class WhisperEngine:
         segments, _info = self.model.transcribe(
             audio,
             language="en",
-            beam_size=1,
+            beam_size=self._beam_size,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=300),
             condition_on_previous_text=False,
