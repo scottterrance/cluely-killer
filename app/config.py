@@ -3,10 +3,13 @@
 Stored as JSON at ~/.cluely_killer/config.json so it survives reinstalls
 and is not bundled with the repo.
 
-This build is intentionally simple:
-  - Whisper: 'small' only, loaded from the model files bundled next to
-    the .exe (in models/hf-cache/hub/). Zero downloads, ever.
-  - LLM: DeepSeek only. Cheap, fast, OpenAI-compatible API.
+This build supports two Whisper models:
+  - 'small'          : bundled offline, ~466 MB, fast on CPU.
+  - 'large-v3-turbo' : requires staging via setup-model.ps1, ~1.5 GB,
+                       significantly higher accuracy for technical jargon
+                       and accented speech. Recommended for serious use.
+
+LLM: DeepSeek only. Cheap, fast, OpenAI-compatible API.
 """
 from __future__ import annotations
 
@@ -33,9 +36,11 @@ class Settings:
     deepseek_base_url: str = "https://api.deepseek.com/v1"
 
     # ---- Speech-to-Text (faster-whisper) ----
-    # Locked to 'small' - the model files are bundled next to the .exe
-    # so the friend never sees a download. ~466 MB on disk, ~3-5s
-    # transcription per 25-second clip on a typical CPU at int8.
+    # 'small'          : bundled offline, ~466 MB. Fast on CPU.
+    # 'large-v3-turbo' : ~1.5 GB, much higher accuracy for technical
+    #                    terms and accented speech. Requires GPU for
+    #                    real-time speed; usable on CPU but slower.
+    # Run setup-model.ps1 to stage either model into ./models/.
     whisper_model: str = "small"
     whisper_compute: str = "int8"
     whisper_device: str = "cpu"

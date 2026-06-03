@@ -3,6 +3,12 @@
 The Controller lives on the main thread but offloads the heavy work
 (STT + LLM) to a worker thread so the UI never freezes. UI updates
 are delivered via Qt signals, which are queued safely across threads.
+
+Enhanced in this version:
+- Classifies each question into a tier (System Design / Coding / Conceptual /
+  Behavioral) and injects the appropriate depth instructions into the prompt.
+- Logs the detected question type so the candidate can see it in the status bar.
+- Passes question_type through to the prompt builder for adaptive responses.
 """
 from __future__ import annotations
 
@@ -15,9 +21,18 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..audio.buffer import RollingAudioBuffer
 from ..config import Settings
 from ..llm.base import LLMProvider
-from ..prompts.builder import ExampleScheduler
+from ..prompts.builder import ExampleScheduler, QuestionType, classify_question
 from ..stt.whisper_engine import WhisperEngine
 from .history import ConversationHistory
+
+
+# Human-readable labels for the status bar
+_TYPE_LABELS: dict[QuestionType, str] = {
+    QuestionType.SYSTEM_DESIGN: "System Design",
+    QuestionType.CODING_ALGO:   "Technical / Coding",
+    QuestionType.CONCEPTUAL:    "Conceptual",
+    QuestionType.BEHAVIORAL:    "Behavioral",
+}
 
 
 def _friendly_error(exc: BaseException) -> str:
@@ -55,13 +70,14 @@ def _friendly_error(exc: BaseException) -> str:
 
 class Controller(QObject):
     # UI signals
-    transcript_ready = pyqtSignal(str)
-    answer_started = pyqtSignal()
-    answer_chunk = pyqtSignal(str)
-    answer_finished = pyqtSignal()
-    error = pyqtSignal(str)
-    status = pyqtSignal(str)
-    history_changed = pyqtSignal(int)  # current turn count
+    transcript_ready  = pyqtSignal(str)
+    answer_started    = pyqtSignal()
+    answer_chunk      = pyqtSignal(str)
+    answer_finished   = pyqtSignal()
+    error             = pyqtSignal(str)
+    status            = pyqtSignal(str)
+    history_changed   = pyqtSignal(int)   # current turn count
+    question_type_detected = pyqtSignal(str)  # NEW: human-readable tier label
 
     def __init__(
         self,
@@ -70,7 +86,7 @@ class Controller(QObject):
         whisper: WhisperEngine,
         llm_factory: Callable[[Settings], LLMProvider],
         scheduler: ExampleScheduler,
-        prompt_builder: Callable[[Settings, bool], str],
+        prompt_builder: Callable[..., str],
         history: ConversationHistory,
     ):
         super().__init__()
@@ -89,7 +105,9 @@ class Controller(QObject):
         if not self._busy.acquire(blocking=False):
             self.status.emit("Busy - wait for current answer to finish")
             return
-        threading.Thread(target=self._do_answer, daemon=True, name="AnswerWorker").start()
+        threading.Thread(
+            target=self._do_answer, daemon=True, name="AnswerWorker"
+        ).start()
 
     def clear(self) -> None:
         self.audio_buffer.clear()
@@ -101,9 +119,13 @@ class Controller(QObject):
     def _do_answer(self) -> None:
         try:
             self.status.emit("Transcribing...")
-            audio = self.audio_buffer.get_last_seconds(self.settings.answer_window_seconds)
+            audio = self.audio_buffer.get_last_seconds(
+                self.settings.answer_window_seconds
+            )
             if audio.size < self.whisper.samplerate:  # less than 1 second
-                self.error.emit("Not enough audio yet - let the interviewer talk first.")
+                self.error.emit(
+                    "Not enough audio yet - let the interviewer talk first."
+                )
                 return
 
             transcript = self.whisper.transcribe(audio)
@@ -113,14 +135,23 @@ class Controller(QObject):
             self.transcript_ready.emit(transcript)
             print(f"[answer] transcript: {transcript[:200]!r}", flush=True)
 
-            self.status.emit("Thinking...")
+            # --- Classify the question type for adaptive prompt selection ---
+            q_type = classify_question(transcript)
+            type_label = _TYPE_LABELS[q_type]
+            self.question_type_detected.emit(type_label)
+            self.status.emit(f"Thinking... [{type_label}]")
+            print(f"[answer] question_type={q_type.name}", flush=True)
+
             include_example = self.scheduler.should_include()
-            system_prompt = self.prompt_builder(self.settings, include_example)
+            system_prompt = self.prompt_builder(
+                self.settings, include_example, q_type
+            )
             llm = self.llm_factory(self.settings)
             prior = self.history.as_messages()
             print(
                 f"[answer] provider=deepseek "
-                f"history_turns={len(prior)//2}",
+                f"history_turns={len(prior)//2} "
+                f"q_type={q_type.name}",
                 flush=True,
             )
 
@@ -128,7 +159,9 @@ class Controller(QObject):
             chunks: list[str] = []
             err_msg: str | None = None
             try:
-                for chunk in llm.stream_chat(system_prompt, transcript, prior_messages=prior):
+                for chunk in llm.stream_chat(
+                    system_prompt, transcript, prior_messages=prior
+                ):
                     chunks.append(chunk)
                     self.answer_chunk.emit(chunk)
             except Exception as e:
@@ -143,27 +176,23 @@ class Controller(QObject):
             )
 
             # Decide what to surface. Critical: never leave the answer panel
-            # silently empty - the candidate has no idea what happened
-            # otherwise.
+            # silently empty - the candidate has no idea what happened.
             fallback: str | None = None
             if err_msg:
                 fallback = f"\u26a0  {err_msg}"
             elif not full:
                 fallback = (
                     "\u26a0  The LLM returned an empty response. "
-                    "Check your API key / quota / model name in Settings -> AI Provider, "
-                    "or switch to a different provider."
+                    "Check your API key / quota / model name in Settings -> AI Provider."
                 )
             elif full.upper() == "SKIP":
                 fallback = (
-                    "\u26a0  The model output 'SKIP' - it judged the transcribed text as not a "
-                    "clear question. Press Ctrl+R to clear, then Ctrl+Space again right after "
-                    "the interviewer finishes speaking."
+                    "\u26a0  The model output 'SKIP' - it judged the transcribed text "
+                    "as not a clear question. Press Ctrl+R to clear, then Ctrl+Space "
+                    "again right after the interviewer finishes speaking."
                 )
 
             if fallback:
-                # If chunks already arrived, append the warning. If the panel
-                # is empty, the warning IS the visible content.
                 separator = "\n\n" if chunks else ""
                 self.answer_chunk.emit(separator + fallback)
 
@@ -173,7 +202,7 @@ class Controller(QObject):
             if not err_msg and full and full.upper() != "SKIP":
                 self.history.add(transcript, full)
                 self.history_changed.emit(len(self.history))
-                self.status.emit("Ready")
+                self.status.emit(f"Ready  [{type_label}]")
             else:
                 self.status.emit("See answer panel - non-success outcome.")
         except Exception as e:

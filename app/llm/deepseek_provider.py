@@ -14,9 +14,17 @@ Get a key at https://platform.deepseek.com/api_keys. Pricing as of
 writing is ~$0.14/M input tokens / $0.28/M output for deepseek-chat,
 so a typical interview Q+A is well under a tenth of a cent.
 
-Implementation note: SSE format is identical to OpenAI / OpenRouter so
-this is essentially the OpenRouter provider stripped of the fallback
-chain (DeepSeek's models are stable, no need to chain).
+Enhanced in this version:
+- max_tokens raised from 400 to 700 to accommodate System Design and
+  Coding answers that legitimately need more depth (6-10 sentences).
+- temperature lowered from 0.6 to 0.55 for more precise, consistent
+  technical answers while retaining natural variation in tone.
+- top_p kept at 0.95 for vocabulary diversity in spoken responses.
+- frequency_penalty added at 0.15 to reduce repetitive phrasing across
+  a long interview session (the model won't keep saying "In my experience"
+  every single answer).
+- presence_penalty added at 0.10 to gently encourage the model to
+  introduce new concepts rather than restating the same points.
 """
 from __future__ import annotations
 
@@ -67,9 +75,17 @@ class DeepSeekProvider(LLMProvider):
             "model": self.model,
             "messages": msgs,
             "stream": True,
-            "temperature": 0.6,
-            "max_tokens": 400,
+            # Slightly lower temperature for more precise, consistent technical
+            # answers while retaining natural variation in tone.
+            "temperature": 0.55,
+            # Raised from 400 to 700 to support deep System Design and Coding
+            # answers that legitimately require 6-10 sentences of explanation.
+            "max_tokens": 700,
             "top_p": 0.95,
+            # Reduces repetitive phrasing across a long interview session.
+            "frequency_penalty": 0.15,
+            # Gently encourages introducing new concepts rather than restating.
+            "presence_penalty": 0.10,
         }
 
         try:

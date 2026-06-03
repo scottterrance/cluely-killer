@@ -6,10 +6,13 @@ recognized:
   ==word==   -> RED   (most stressed keywords, 2-3 per sentence)
   **word**   -> YELLOW (softer secondary emphasis, sparing)
 
-The header carries a STEALTH / VISIBLE badge so the candidate can verify
-at a glance that the overlay is hidden from screen capture before
-starting the interview, plus a small "mem N" badge showing how many
-prior Q+A turns the LLM is remembering.
+The header carries:
+  - A STEALTH / VISIBLE badge so the candidate can verify the overlay is
+    hidden from screen capture before starting the interview.
+  - A "mem N" badge showing how many prior Q+A turns the LLM remembers.
+  - A question-type badge (System Design / Technical / Conceptual / Behavioral)
+    showing the detected tier for the current question — so the candidate
+    knows at a glance what depth of answer is being generated.
 """
 from __future__ import annotations
 
@@ -34,7 +37,7 @@ from .styles import APP_QSS
 
 # Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
 # over '=' / '*' boundaries on partial streams.
-_RED_RE = re.compile(r"==(.+?)==", flags=re.DOTALL)
+_RED_RE  = re.compile(r"==(.+?)==", flags=re.DOTALL)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
 
 _RED_STYLE = 'color:#FF6B6B;font-weight:700;'
@@ -49,6 +52,16 @@ def _md_to_html(text: str) -> str:
     text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
     text = _BOLD_RE.sub(r"<b>\1</b>", text)
     return text.replace("\n", "<br>")
+
+
+# Colour map for the question-type badge
+_TYPE_BADGE_COLOURS: dict[str, tuple[str, str]] = {
+    "System Design":   ("#a78bfa", "rgba(167,139,250,28)"),   # purple
+    "Technical / Coding": ("#34d399", "rgba(52,211,153,28)"), # green
+    "Conceptual":      ("#7CC8FF", "rgba(124,200,255,28)"),   # blue
+    "Behavioral":      ("#fbbf24", "rgba(251,191,36,28)"),    # amber
+}
+_DEFAULT_BADGE_COLOUR = ("#c8ced9", "rgba(200,206,217,20)")
 
 
 class OverlayWindow(QWidget):
@@ -148,15 +161,28 @@ class OverlayWindow(QWidget):
 
         self.mem_label = QLabel("mem 0")
         self.mem_label.setObjectName("memBadge")
-        self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
+        self.mem_label.setToolTip(
+            "Conversation memory: number of prior Q+A turns the LLM remembers"
+        )
         header.addWidget(self.mem_label)
+
+        # NEW: question-type badge — shows the detected tier
+        self.qtype_label = QLabel("")
+        self.qtype_label.setObjectName("qtypeBadge")
+        self.qtype_label.setToolTip(
+            "Detected question type — determines the depth and structure of the answer"
+        )
+        self.qtype_label.hide()  # hidden until first question is classified
+        header.addWidget(self.qtype_label)
 
         header.addStretch()
 
         self.stealth_label = QLabel("STEALTH")
         self.stealth_label.setObjectName("stealthBadge")
         self.stealth_label.setProperty("alarm", "false")
-        self.stealth_label.setToolTip("Hidden from Zoom / Teams / Meet / OBS screen capture.")
+        self.stealth_label.setToolTip(
+            "Hidden from Zoom / Teams / Meet / OBS screen capture."
+        )
         header.addWidget(self.stealth_label)
 
         self.settings_btn = QPushButton("\u2699")
@@ -228,9 +254,20 @@ class OverlayWindow(QWidget):
                 "STEALTH OFF - the interviewer WILL see this overlay if you share your screen!"
             )
             self.stealth_label.setProperty("alarm", "true")
-        # Re-evaluate the [alarm] style selector.
         self.stealth_label.style().unpolish(self.stealth_label)
         self.stealth_label.style().polish(self.stealth_label)
+
+    def _update_qtype_badge(self, label: str) -> None:
+        """Update the question-type badge with the detected tier label."""
+        fg, bg = _TYPE_BADGE_COLOURS.get(label, _DEFAULT_BADGE_COLOUR)
+        self.qtype_label.setText(label)
+        self.qtype_label.setStyleSheet(
+            f"color:{fg}; background-color:{bg}; "
+            f"font-size:9px; font-weight:700; letter-spacing:0.4px; "
+            f"padding:2px 7px; border-radius:8px; "
+            f"border:1px solid {fg.replace(')', ',60)').replace('rgb', 'rgba') if fg.startswith('rgb') else fg};"
+        )
+        self.qtype_label.show()
 
     # ------------------------------------------------------------------
     def _wire_signals(self) -> None:
@@ -242,6 +279,7 @@ class OverlayWindow(QWidget):
         c.error.connect(self._on_error)
         c.status.connect(self._on_status)
         c.history_changed.connect(self._on_history_changed)
+        c.question_type_detected.connect(self._on_question_type_detected)
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
@@ -278,13 +316,19 @@ class OverlayWindow(QWidget):
     def _on_history_changed(self, n: int) -> None:
         self.mem_label.setText(f"mem {n}")
 
+    @pyqtSlot(str)
+    def _on_question_type_detected(self, label: str) -> None:
+        self._update_qtype_badge(label)
+
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)
     def mousePressEvent(self, e):
         if self.simple_mode:
             return super().mousePressEvent(e)
         if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._drag_offset = (
+                e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
             e.accept()
 
     def mouseMoveEvent(self, e):
