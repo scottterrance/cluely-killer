@@ -331,14 +331,26 @@ class OverlayWindow(QWidget):
         self._answer_text = ""
         self.answer_view.setHtml("")
         self.status_label.setText("Answering...")
+        # Always start reading from the top of a new answer.
+        # Scroll to top immediately so the first sentence is visible.
+        self.answer_view.verticalScrollBar().setValue(0)
 
     @pyqtSlot(str)
     def _on_answer_chunk(self, chunk: str) -> None:
         self._answer_text += chunk
+        # Remember scroll position BEFORE updating HTML so we can
+        # decide whether to follow the bottom or stay where the user is.
+        sb = self.answer_view.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 4
         self.answer_view.setHtml(_md_to_html(self._answer_text))
-        cursor = self.answer_view.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.answer_view.setTextCursor(cursor)
+        # After setHtml Qt resets the scrollbar to 0 (top). We want:
+        #   - If the user hasn't scrolled down yet -> stay at top (first line visible).
+        #   - If the user has scrolled down manually -> follow the bottom so they
+        #     keep seeing new content as it streams in.
+        if at_bottom and sb.maximum() > 0:
+            # User was already at the bottom - follow streaming output.
+            sb.setValue(sb.maximum())
+        # else: setHtml already reset to 0 (top) - first line stays visible.
 
     @pyqtSlot()
     def _on_answer_finished(self) -> None:
