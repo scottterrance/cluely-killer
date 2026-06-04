@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
@@ -69,7 +69,8 @@ class OverlayWindow(QWidget):
         self.simple_mode = simple_mode
         self._answer_text = ""
         self._drag_offset = None
-        # Accumulated live transcript text (rolling window of last ~400 chars)
+        self._user_scrolled_down = False  # tracks if user scrolled down during streaming
+        # Accumulated live transcript text (rolling window of last ~800 chars)
         self._live_transcript_text = ""
 
         self._setup_window()
@@ -329,28 +330,30 @@ class OverlayWindow(QWidget):
     @pyqtSlot()
     def _on_answer_start(self) -> None:
         self._answer_text = ""
+        self._user_scrolled_down = False  # reset: user hasn't scrolled yet
         self.answer_view.setHtml("")
         self.status_label.setText("Answering...")
-        # Always start reading from the top of a new answer.
-        # Scroll to top immediately so the first sentence is visible.
+        # Pin to top immediately.
         self.answer_view.verticalScrollBar().setValue(0)
 
     @pyqtSlot(str)
     def _on_answer_chunk(self, chunk: str) -> None:
         self._answer_text += chunk
-        # Remember scroll position BEFORE updating HTML so we can
-        # decide whether to follow the bottom or stay where the user is.
+        # Snapshot scroll state BEFORE setHtml() wipes it.
         sb = self.answer_view.verticalScrollBar()
-        at_bottom = sb.value() >= sb.maximum() - 4
+        # If the user has scrolled down at all, track that intent.
+        if sb.value() > 4:
+            self._user_scrolled_down = True
         self.answer_view.setHtml(_md_to_html(self._answer_text))
-        # After setHtml Qt resets the scrollbar to 0 (top). We want:
-        #   - If the user hasn't scrolled down yet -> stay at top (first line visible).
-        #   - If the user has scrolled down manually -> follow the bottom so they
-        #     keep seeing new content as it streams in.
-        if at_bottom and sb.maximum() > 0:
-            # User was already at the bottom - follow streaming output.
-            sb.setValue(sb.maximum())
-        # else: setHtml already reset to 0 (top) - first line stays visible.
+        # setHtml() always resets the scrollbar to 0 internally.
+        # We use a zero-delay timer so Qt finishes layout BEFORE we
+        # restore the position - otherwise maximum() is still 0.
+        if self._user_scrolled_down:
+            # User scrolled down intentionally: follow the bottom.
+            QTimer.singleShot(0, lambda: self.answer_view.verticalScrollBar().setValue(
+                self.answer_view.verticalScrollBar().maximum()
+            ))
+        # else: leave at 0 (top) - first line stays visible.
 
     @pyqtSlot()
     def _on_answer_finished(self) -> None:
