@@ -73,14 +73,15 @@ class SettingsDialog(QDialog):
         self._suppress_persona_signal = False
 
         self.setWindowTitle("cluely-killer - Settings")
-        self.resize(680, 620)
+        # Compact: 640 wide, 580 tall - enough for all tabs without wasting space.
+        self.resize(640, 580)
 
         tabs = QTabWidget()
         tabs.addTab(self._provider_tab(), "AI Provider")
         tabs.addTab(self._context_tab(), "Your Context")
         tabs.addTab(self._audio_tab(), "Audio / STT")
         tabs.addTab(self._hotkeys_tab(), "Hotkeys")
-        tabs.addTab(self._window_tab(), "Window")
+        tabs.addTab(self._display_tab(), "Display")
 
         save_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
@@ -126,18 +127,19 @@ class SettingsDialog(QDialog):
         # difference between a ~4s and a ~1.5s answer.
         self.brevity_combo = QComboBox()
         for label, val in [
-            ("Concise - 1-2 sentences (FASTEST)", "concise"),
-            ("Normal - 2-3 sentences", "normal"),
-            ("Detailed - 3-5 sentences (slowest)", "detailed"),
+            ("Brief - 1-2 sentences (ultra-fast)", "brief"),
+            ("Concise - 2-4 sentences (fast, default)", "concise"),
+            ("Detailed - 4-7 sentences (thorough)", "detailed"),
+            ("Deep - 6-10 sentences (full technical depth)", "deep"),
         ]:
             self.brevity_combo.addItem(label, val)
         bi = self.brevity_combo.findData(self.settings.answer_brevity)
-        self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 0)
-        f.addRow("Answer length (speed):", self.brevity_combo)
+        self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 1)
+        f.addRow("Answer length:", self.brevity_combo)
         f.addRow(QLabel(
-            "<i>Answer length is the main lever for <b>answer speed</b>: the "
-            "model writes one word at a time, so a shorter answer appears "
-            "faster. Pick <b>Concise</b> for the fastest replies.</i>"
+            "<i><b>Brief/Concise</b> = fastest replies. "
+            "<b>Deep</b> = full technical depth for drill-down questions "
+            "(trade-offs, edge cases, internals). Switch mid-interview as needed.</i>"
         ))
 
         # Speculative pre-generation: start answering on the interviewer's
@@ -567,20 +569,40 @@ class SettingsDialog(QDialog):
         )
         return w
 
-    def _window_tab(self) -> QWidget:
+    def _display_tab(self) -> QWidget:
+        """Compact Display tab: stealth + opacity + live transcription toggle."""
         w = QWidget()
         f = QFormLayout(w)
-        self.exclude_check = QCheckBox("Hide window from screen capture (Windows 10 build 19041+)")
-        self.exclude_check.setChecked(self.settings.exclude_from_capture)
+        f.setVerticalSpacing(10)
 
+        # Stealth / screen capture
+        self.exclude_check = QCheckBox(
+            "Hide overlay from screen capture (Windows 10 build 19041+)"
+        )
+        self.exclude_check.setChecked(self.settings.exclude_from_capture)
+        f.addRow(self.exclude_check)
+
+        # Opacity
         self.opacity_spin = QDoubleSpinBox()
         self.opacity_spin.setRange(0.4, 1.0)
         self.opacity_spin.setSingleStep(0.05)
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setValue(self.settings.opacity)
-
-        f.addRow(self.exclude_check)
         f.addRow("Opacity:", self.opacity_spin)
+
+        # Live transcription
+        self.live_transcript_check = QCheckBox(
+            "Show live transcription in overlay (same size as answer text)"
+        )
+        self.live_transcript_check.setChecked(
+            getattr(self.settings, "live_transcription_enabled", True)
+        )
+        f.addRow(self.live_transcript_check)
+        f.addRow(QLabel(
+            "<i>When on, the interviewer's speech is transcribed and displayed "
+            "in real-time so you can read along without listening. "
+            "Updates as each Whisper segment arrives.</i>"
+        ))
         return w
 
     # ------------------------------------------------------------------
@@ -625,6 +647,7 @@ class SettingsDialog(QDialog):
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())
+        s.live_transcription_enabled = self.live_transcript_check.isChecked()
 
         # Sync the active persona with whatever's now in the boxes so
         # personas always reflect what the user just committed.

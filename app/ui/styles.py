@@ -69,6 +69,26 @@ QWidget#OverlayRoot {
     padding: 2px 0;
 }
 
+/* Live transcription panel - same font size as answer for easy reading */
+#liveTranscript {
+    background-color: rgba(255, 255, 255, 6);
+    color: #c8ced9;
+    border: none;
+    border-left: 2px solid rgba(124, 200, 255, 80);
+    font-size: 14px;
+    font-family: 'Segoe UI', 'Inter', sans-serif;
+    padding: 4px 8px;
+    border-radius: 0 4px 4px 0;
+}
+
+#liveTranscriptLabel {
+    color: #7CC8FF;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 0;
+}
+
 #answer {
     background-color: transparent;
     color: #f1f3f5;

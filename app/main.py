@@ -234,7 +234,8 @@ def main() -> None:
             model=s.deepseek_model,
             base_url=s.deepseek_base_url,
             # Lower max_tokens for shorter brevity = faster answers.
-            max_tokens=LENGTH_MAX_TOKENS.get(s.answer_brevity, 110),
+            # New levels: brief=80, concise=160, detailed=380, deep=600.
+            max_tokens=LENGTH_MAX_TOKENS.get(s.answer_brevity, 160),
         )
 
     def _prompt_for(s, include_example: bool, question: str = "", brief: str = "") -> str:
@@ -306,6 +307,8 @@ def main() -> None:
             whisper.set_preprocess(settings.audio_preprocess)
             semantic_cache.threshold = settings.semantic_cache_threshold
             _refresh_cache_fingerprint()
+            # Apply live transcription toggle live (no restart needed).
+            overlay.refresh_live_transcript_setting()
 
     overlay = OverlayWindow(
         settings,

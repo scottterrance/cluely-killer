@@ -40,9 +40,10 @@ class Settings:
     # Answer length - THE main lever for answer SPEED when STT is fast
     # (e.g. on a GPU). LLMs generate tokens sequentially, so answer
     # latency is ~proportional to output length. Options:
-    #   "concise"  - 1-2 short sentences (~110 token cap). Fastest. Default.
-    #   "normal"   - 2-3 sentences (~220 token cap).
-    #   "detailed" - 3-5 sentences (~400 token cap). Slowest.
+    #   "brief"    - 1-2 sentences (~80 token cap). Ultra-fast.
+    #   "concise"  - 2-4 sentences (~160 token cap). Fast. Default.
+    #   "detailed" - 4-7 sentences (~380 token cap). Thorough.
+    #   "deep"     - 6-10 sentences (~600 token cap). Full technical depth.
     answer_brevity: str = "concise"
 
     # ---- Retrieval / context (roadmap #9) ----
@@ -172,6 +173,13 @@ class Settings:
     resume_text: str = ""
     job_description: str = ""
     custom_system_prompt: str = ""
+
+    # ---- Live transcription display ----
+    # When True, the interviewer's transcribed speech is shown in the
+    # overlay in real-time (same font size as the answer panel) so the
+    # user can read along without needing to hear the audio. The display
+    # updates as each Whisper segment arrives. Toggle in Settings -> Display.
+    live_transcription_enabled: bool = True
 
     # ---- Window / stealth ----
     exclude_from_capture: bool = True

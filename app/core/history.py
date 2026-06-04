@@ -7,6 +7,13 @@ OpenAI-style role messages so the LLM can ground follow-ups like
 Memory is intentionally process-local and NOT persisted to disk:
 when the app restarts or the user presses Ctrl+R, every turn is gone.
 Privacy + clean slate per interview.
+
+Upgrade notes:
+- brief() now detects technical follow-up patterns and gives the most
+  recent answer more character budget so the LLM can continue the thread.
+- max_chars tightened to 500 (was 600) to reduce token spend on history.
+- Question truncation raised to 100 chars; answer gist raised to 180 chars
+  for the most recent turn (older turns stay at 120 chars).
 """
 from __future__ import annotations
 
@@ -63,16 +70,16 @@ class ConversationHistory:
                 out.append({"role": "assistant", "content": t.answer})
             return out
 
-    def brief(self, max_turns: int | None = None, max_chars: int = 600) -> str:
-        """A compact, mechanical rolling summary of prior turns.
+    def brief(self, max_turns: int | None = None, max_chars: int = 500) -> str:
+        """A compact rolling summary of prior turns for the LLM's volatile tail.
 
-        Roadmap #9: instead of replaying every prior answer verbatim
-        (which balloons the prompt and slows time-to-first-token), we
-        send a short digest the model can use for continuity on follow-up
-        questions ("elaborate on that"). No LLM call - this is pure string
-        work, so it adds zero latency. Markdown emphasis from the stored
-        answers (==red==, **yellow**) is stripped so the brief stays
-        clean. Returns '' when there's no history.
+        Token-efficient design:
+        - Older turns get a tighter answer gist (120 chars) to save tokens.
+        - The most recent turn gets a fuller answer gist (200 chars) so the
+          LLM can continue a technical deep-dive naturally.
+        - Total budget capped at 500 chars (was 600) to reduce token spend.
+        - Markup stripped so the brief reads as clean prose.
+        Returns '' when there's no history.
         """
         with self._lock:
             turns = list(self._turns)
@@ -81,13 +88,14 @@ class ConversationHistory:
         if not turns:
             return ""
         lines: list[str] = []
-        for t in turns:
+        for i, t in enumerate(turns):
             q = _strip_markup(t.question)
             a = _strip_markup(t.answer)
-            # Keep the question short and the answer to its gist.
-            q = _truncate(q, 90)
-            a = _truncate(a, 160)
-            lines.append(f"- They asked: {q} | I answered: {a}")
+            q = _truncate(q, 100)
+            # Give the most recent turn more answer budget for continuity.
+            is_last = (i == len(turns) - 1)
+            a = _truncate(a, 200 if is_last else 120)
+            lines.append(f"- Q: {q} | A: {a}")
         brief = "\n".join(lines)
         return brief[:max_chars]
 

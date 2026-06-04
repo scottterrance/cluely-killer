@@ -90,6 +90,10 @@ class ContinuousTranscriber:
         # the lock on the worker thread; the callback must be cheap and
         # non-blocking (it just kicks off a background task).
         self.on_segment = None
+        # Optional callback fired for EVERY new segment (including
+        # max_chunk and forced flushes) for live transcription display.
+        # Signature: on_live_segment(text: str). Called outside the lock.
+        self.on_live_segment = None
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -323,5 +327,13 @@ class ContinuousTranscriber:
         if fired_seq is not None and self.on_segment is not None:
             try:
                 self.on_segment(fired_seq)
+            except Exception:
+                traceback.print_exc()
+
+        # Fire the live-transcription callback for every segment so the
+        # overlay can display the running transcript in real time.
+        if text and self.on_live_segment is not None:
+            try:
+                self.on_live_segment(text)
             except Exception:
                 traceback.print_exc()

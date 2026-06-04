@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 from ..config import Settings
@@ -68,6 +69,8 @@ class OverlayWindow(QWidget):
         self.simple_mode = simple_mode
         self._answer_text = ""
         self._drag_offset = None
+        # Accumulated live transcript text (rolling window of last ~400 chars)
+        self._live_transcript_text = ""
 
         self._setup_window()
         self._build_ui()
@@ -192,15 +195,32 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
-        # --- Question / transcript ---
+        # --- Question / transcript (last confirmed question) ---
         self.question_label = QLabel(
             "Press '1' for a quick answer to the last thing said, "
             "or '2' to also use the last 5 Q+A as context."
         )
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
-        self.question_label.setMaximumHeight(60)
+        self.question_label.setMaximumHeight(50)
         v.addWidget(self.question_label)
+
+        # --- Live transcription panel (optional, same font size as answer) ---
+        self._live_transcript_header = QLabel("LIVE")
+        self._live_transcript_header.setObjectName("liveTranscriptLabel")
+        self._live_transcript_view = QTextBrowser()
+        self._live_transcript_view.setObjectName("liveTranscript")
+        self._live_transcript_view.setOpenExternalLinks(False)
+        self._live_transcript_view.setFrameShape(QFrame.Shape.NoFrame)
+        # Compact: max 3 lines tall (~60px), grows only if needed.
+        self._live_transcript_view.setMaximumHeight(72)
+        self._live_transcript_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        v.addWidget(self._live_transcript_header)
+        v.addWidget(self._live_transcript_view)
+        # Show/hide based on setting
+        self._apply_live_transcript_visibility()
 
         # --- Answer ---
         self.answer_view = QTextBrowser()
@@ -247,6 +267,19 @@ class OverlayWindow(QWidget):
         self.stealth_label.style().polish(self.stealth_label)
 
     # ------------------------------------------------------------------
+    def _apply_live_transcript_visibility(self) -> None:
+        """Show or hide the live transcript panel based on settings."""
+        enabled = getattr(self.settings, "live_transcription_enabled", True)
+        self._live_transcript_header.setVisible(enabled)
+        self._live_transcript_view.setVisible(enabled)
+
+    def refresh_live_transcript_setting(self) -> None:
+        """Called after settings save to apply the live transcription toggle."""
+        self._apply_live_transcript_visibility()
+        if not getattr(self.settings, "live_transcription_enabled", True):
+            self._live_transcript_text = ""
+            self._live_transcript_view.setHtml("")
+
     def _wire_signals(self) -> None:
         c = self.controller
         c.transcript_ready.connect(self._on_transcript)
@@ -257,9 +290,35 @@ class OverlayWindow(QWidget):
         c.status.connect(self._on_status)
         c.history_changed.connect(self._on_history_changed)
         c.backend_used.connect(self._on_backend_used)
+        c.live_transcript_segment.connect(self._on_live_segment)
+
+    @pyqtSlot(str)
+    def _on_live_segment(self, text: str) -> None:
+        """Append a new Whisper segment to the live transcript display.
+        Keeps a rolling window of ~400 chars so the panel stays compact.
+        """
+        if not getattr(self.settings, "live_transcription_enabled", True):
+            return
+        self._live_transcript_text += (" " if self._live_transcript_text else "") + text.strip()
+        # Rolling window: keep only the last 400 chars so the panel
+        # doesn't grow unbounded and stays readable at a glance.
+        if len(self._live_transcript_text) > 400:
+            self._live_transcript_text = "..." + self._live_transcript_text[-380:]
+        self._live_transcript_view.setHtml(
+            f'<span style="color:#c8ced9;font-size:14px;">{self._live_transcript_text}</span>'
+        )
+        cursor = self._live_transcript_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._live_transcript_view.setTextCursor(cursor)
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
+        """Called when a full answer-ready transcript is confirmed.
+        Resets the live panel and shows the confirmed question.
+        """
+        # Clear the live rolling display - the confirmed Q is now shown
+        self._live_transcript_text = ""
+        self._live_transcript_view.setHtml("")
         display = text if len(text) <= 220 else "..." + text[-220:]
         self.question_label.setText(f"Q: {display}")
 

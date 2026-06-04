@@ -118,6 +118,10 @@ class Controller(QObject):
     # is "DeepSeek". fell_back is always False in this build (no backend
     # switching) but kept so the overlay badge slot is unchanged.
     backend_used = pyqtSignal(str, str, bool)
+    # Live transcription: emitted for every new Whisper segment so the
+    # overlay can display the running transcript in real time.
+    # Carries the incremental segment text (not the full accumulated text).
+    live_transcript_segment = pyqtSignal(str)
 
     def __init__(
         self,
@@ -150,6 +154,9 @@ class Controller(QObject):
         # speculative pre-generation when the interviewer stops talking.
         if self.transcriber is not None:
             self.transcriber.on_segment = self.on_pause_segment
+            # Wire the live-transcription callback so every new segment
+            # is forwarded to the overlay (if live transcription is on).
+            self.transcriber.on_live_segment = self._on_live_segment_from_worker
         self._busy = threading.Lock()
         # Sample-position marker: "last sample we already consumed in a
         # successful answer". Initialized to -1 so the very first press
@@ -166,6 +173,13 @@ class Controller(QObject):
         # answer started on an interviewer pause). Guarded by _spec_lock.
         self._spec: _Speculation | None = None
         self._spec_lock = threading.Lock()
+
+    def _on_live_segment_from_worker(self, text: str) -> None:
+        """Called by ContinuousTranscriber worker thread for every new segment.
+        Emits live_transcript_segment signal (thread-safe via Qt queued connection).
+        """
+        if getattr(self.settings, "live_transcription_enabled", True):
+            self.live_transcript_segment.emit(text)
 
     def _continuous_active(self) -> bool:
         return bool(self.transcriber) and bool(self.settings.continuous_stt)
