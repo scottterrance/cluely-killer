@@ -74,6 +74,7 @@ def main() -> None:
     class HotkeyDispatcher(QObject):
         answer_short_requested = pyqtSignal()
         answer_context_requested = pyqtSignal()
+        rephrase_requested = pyqtSignal()
         toggle_requested = pyqtSignal()
         clear_requested = pyqtSignal()
         settings_requested = pyqtSignal()
@@ -349,6 +350,9 @@ def main() -> None:
     dispatcher.answer_context_requested.connect(
         lambda: controller.trigger_answer("context"), qc
     )
+    dispatcher.rephrase_requested.connect(
+        controller.trigger_rephrase, qc
+    )
     dispatcher.toggle_requested.connect(lambda: overlay.toggle_visibility(), qc)
     dispatcher.clear_requested.connect(controller.clear, qc)
     dispatcher.settings_requested.connect(open_settings_dialog, qc)
@@ -358,6 +362,7 @@ def main() -> None:
         hotkeys.set_hotkeys({
             settings.hotkey_answer_short: dispatcher.answer_short_requested.emit,
             settings.hotkey_answer_context: dispatcher.answer_context_requested.emit,
+            settings.hotkey_rephrase: dispatcher.rephrase_requested.emit,
             settings.hotkey_toggle: dispatcher.toggle_requested.emit,
             settings.hotkey_clear: dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,

@@ -62,6 +62,26 @@ QWidget#OverlayRoot {
     border: 1px solid rgba(251, 191, 36, 90);
 }
 
+/* Question type auto-classifier badge */
+#qtypeBadge {
+    color: #a78bfa;
+    background-color: rgba(167, 139, 250, 22);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 2px 7px;
+    border-radius: 8px;
+    border: 1px solid rgba(167, 139, 250, 55);
+}
+
+/* Filler word / confidence badge - color set dynamically in Python */
+#fillerBadge {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
 #question {
     color: #9aa3b2;
     font-size: 12px;

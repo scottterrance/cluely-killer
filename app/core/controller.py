@@ -35,6 +35,7 @@ from ..llm.base import LLMProvider
 from ..prompts.builder import ExampleScheduler
 from ..stt.whisper_engine import WhisperEngine
 from .history import ConversationHistory
+from .analysis import FillerReport, ClassificationResult, detect_fillers, classify_question
 
 
 AnswerMode = Literal["short", "context"]
@@ -122,6 +123,11 @@ class Controller(QObject):
     # overlay can display the running transcript in real time.
     # Carries the incremental segment text (not the full accumulated text).
     live_transcript_segment = pyqtSignal(str)
+    # Filler word analysis: emitted after each successful answer with the
+    # FillerReport for the INTERVIEWER's transcript (not the answer).
+    filler_report = pyqtSignal(object)   # FillerReport
+    # Question type classification: emitted right after transcript is ready.
+    question_classified = pyqtSignal(object)  # ClassificationResult
 
     def __init__(
         self,
@@ -173,6 +179,9 @@ class Controller(QObject):
         # answer started on an interviewer pause). Guarded by _spec_lock.
         self._spec: _Speculation | None = None
         self._spec_lock = threading.Lock()
+        # Store the last transcript + answer for the rephrase feature.
+        self._last_transcript: str = ""
+        self._last_answer: str = ""
 
     def _on_live_segment_from_worker(self, text: str) -> None:
         """Called by ContinuousTranscriber worker thread for every new segment.
@@ -229,6 +238,80 @@ class Controller(QObject):
             daemon=True,
             name=f"AnswerWorker-{mode}",
         ).start()
+
+    def trigger_rephrase(self) -> None:
+        """Key '3' entry point: regenerate the last answer with a different angle.
+
+        Uses the same transcript as the last answer but sends a rephrase
+        instruction so DeepSeek approaches it from a fresh perspective -
+        different structure, different example, different emphasis.
+        Non-blocking; safe to call from any thread.
+        """
+        if not self._last_transcript:
+            self.status.emit("Nothing to rephrase yet - answer a question first.")
+            return
+        if not self._busy.acquire(blocking=False):
+            self.status.emit("Busy - wait for current answer to finish")
+            return
+        threading.Thread(
+            target=self._do_rephrase,
+            daemon=True,
+            name="RephraseWorker",
+        ).start()
+
+    def _do_rephrase(self) -> None:
+        """Worker thread: rephrase the last answer from a different angle."""
+        try:
+            transcript = self._last_transcript
+            prev_answer = self._last_answer
+            self.answer_started.emit()
+            self.status.emit("Rephrasing...")
+
+            # Build a rephrase system prompt: same persona rules but
+            # instruct the model to use a different structure / example.
+            rephrase_system = self.prompt_builder(
+                self.settings,
+                include_example=True,   # always include an example on rephrase
+                question=transcript,
+                brief="",
+            ) + (
+                "\n\nREPHRASE INSTRUCTION: The candidate already gave this answer: "
+                f"\"\"\"\n{prev_answer[:400]}\n\"\"\"\n"
+                "Give a DIFFERENT version: different opening, different structure, "
+                "different concrete example or metric. Same facts, fresh delivery. "
+                "Do NOT repeat the previous answer verbatim."
+            )
+
+            llm = self.llm_factory(self.settings)
+            chunks: list[str] = []
+            err_msg: str | None = None
+            try:
+                for chunk in llm.stream_chat(rephrase_system, transcript):
+                    chunks.append(chunk)
+                    self.answer_chunk.emit(chunk)
+            except Exception as e:
+                traceback.print_exc()
+                err_msg = _friendly_error(e)
+
+            full = "".join(chunks).strip()
+            if err_msg:
+                self.answer_chunk.emit(f"\n\n\u26a0  {err_msg}")
+            elif not full:
+                self.answer_chunk.emit(
+                    "\u26a0  DeepSeek returned an empty rephrase. Try again."
+                )
+            self.answer_finished.emit()
+            if full and not err_msg:
+                # Update last answer so pressing 3 again rephrases this version.
+                self._last_answer = full
+                self.status.emit("Ready (rephrased)")
+            else:
+                self.status.emit("Rephrase failed - see answer panel.")
+        except Exception as e:
+            traceback.print_exc()
+            self.error.emit(_friendly_error(e))
+        finally:
+            self._busy.release()
 
     def clear(self) -> None:
         self.audio_buffer.clear()
@@ -552,6 +635,15 @@ class Controller(QObject):
                 stt_label = "local (on-press)"
 
             self.transcript_ready.emit(transcript)
+            # Classify the question type instantly (no LLM, keyword rules).
+            q_class = classify_question(transcript)
+            self.question_classified.emit(q_class)
+            print(
+                f"[analysis] question type: {q_class.question_type} "
+                f"(confidence={q_class.confidence:.2f}, "
+                f"brevity hint: {q_class.recommended_brevity})",
+                flush=True,
+            )
             stt_elapsed = time.monotonic() - stt_t0
             print(
                 f"[answer] mode={mode} source={source_label} "
@@ -694,6 +786,17 @@ class Controller(QObject):
 
             success = not err_msg and bool(full)
             if success:
+                # Store for rephrase (key 3) and filler analysis.
+                self._last_transcript = transcript
+                self._last_answer = full
+                # Run filler word detection on the interviewer's transcript.
+                filler = detect_fillers(transcript)
+                self.filler_report.emit(filler)
+                print(
+                    f"[analysis] filler report: {filler.label} "
+                    f"(score={filler.confidence_score})",
+                    flush=True,
+                )
                 # Advance the marker BEFORE writing to history. From the
                 # interviewer's clock perspective, "this question is
                 # done" the moment our transcribe call finished; any

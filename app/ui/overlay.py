@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 
 from ..config import Settings
 from ..core.controller import Controller
+from ..core.analysis import FillerReport, ClassificationResult
 from .styles import APP_QSS
 
 # Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
@@ -156,6 +157,20 @@ class OverlayWindow(QWidget):
         self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
         header.addWidget(self.mem_label)
 
+        # Question type badge: shows auto-classified type of last question.
+        self.qtype_label = QLabel("")
+        self.qtype_label.setObjectName("qtypeBadge")
+        self.qtype_label.setToolTip("Auto-detected question type and recommended depth")
+        self.qtype_label.setVisible(False)
+        header.addWidget(self.qtype_label)
+
+        # Filler word / confidence badge: shows clarity score of last question.
+        self.filler_label = QLabel("")
+        self.filler_label.setObjectName("fillerBadge")
+        self.filler_label.setToolTip("Interviewer speech clarity (filler word count)")
+        self.filler_label.setVisible(False)
+        header.addWidget(self.filler_label)
+
         # Ground-truth engine badge: shows which STT path + LLM produced
         # the last answer (local continuous / local on-press, + DeepSeek).
         self.backend_label = QLabel("engine: -")
@@ -240,9 +255,11 @@ class OverlayWindow(QWidget):
         self.setStyleSheet(APP_QSS)
 
     def _footer_text(self) -> str:
+        rephrase_key = getattr(self.settings, "hotkey_rephrase", "3")
         return (
             f"{self.settings.hotkey_answer_short} answer-only  \u00b7  "
             f"{self.settings.hotkey_answer_context} answer+context  \u00b7  "
+            f"{rephrase_key} rephrase  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
             f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
             f"{self.settings.hotkey_settings} settings"
@@ -294,6 +311,8 @@ class OverlayWindow(QWidget):
         c.history_changed.connect(self._on_history_changed)
         c.backend_used.connect(self._on_backend_used)
         c.live_transcript_segment.connect(self._on_live_segment)
+        c.filler_report.connect(self._on_filler_report)
+        c.question_classified.connect(self._on_question_classified)
 
     @pyqtSlot(str)
     def _on_live_segment(self, text: str) -> None:
@@ -381,6 +400,49 @@ class OverlayWindow(QWidget):
         self.backend_label.setProperty("alarm", "true" if fell_back else "false")
         self.backend_label.style().unpolish(self.backend_label)
         self.backend_label.style().polish(self.backend_label)
+
+    @pyqtSlot(object)
+    def _on_filler_report(self, report: FillerReport) -> None:
+        """Show the filler word / confidence badge after each answer."""
+        score = report.confidence_score
+        if score >= 90:
+            color = "#4CAF50"  # green - very clear
+            icon = "Clear"
+        elif score >= 70:
+            color = "#FFC107"  # amber - some fillers
+            icon = report.label
+        else:
+            color = "#FF6B6B"  # red - many fillers
+            icon = report.label
+        self.filler_label.setText(icon)
+        self.filler_label.setStyleSheet(
+            f"color:{color};font-size:9px;font-weight:600;"
+            "background:rgba(255,255,255,0.06);border-radius:3px;"
+            "padding:1px 4px;"
+        )
+        tip_lines = [f"Clarity score: {score}/100"]
+        if report.per_filler:
+            tip_lines.append("Filler words detected:")
+            for word, cnt in sorted(report.per_filler.items(), key=lambda x: -x[1]):
+                tip_lines.append(f"  '{word}': {cnt}x")
+        else:
+            tip_lines.append("No filler words - very clear speech.")
+        self.filler_label.setToolTip("\n".join(tip_lines))
+        self.filler_label.setVisible(True)
+
+    @pyqtSlot(object)
+    def _on_question_classified(self, result: ClassificationResult) -> None:
+        """Show the question type badge and depth hint after classification."""
+        self.qtype_label.setText(result.display_label)
+        tip = f"Type: {result.question_type}\nRecommended depth: {result.recommended_brevity}"
+        if result.depth_hint:
+            tip += f"\nTip: {result.depth_hint}"
+        self.qtype_label.setToolTip(tip)
+        self.qtype_label.setVisible(True)
+        # Show the depth hint briefly in the status bar.
+        if result.depth_hint:
+            self.status_label.setText(result.depth_hint)
+            QTimer.singleShot(3500, lambda: self.status_label.setText("Answering..."))
 
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)

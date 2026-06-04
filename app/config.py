@@ -163,6 +163,9 @@ class Settings:
     #     that?", "what about the edge case?").
     hotkey_answer_short: str = "1"
     hotkey_answer_context: str = "2"
+    # Rephrase: regenerate the last answer from a different angle.
+    # Same question, fresh structure, different example. No new audio needed.
+    hotkey_rephrase: str = "3"
     hotkey_toggle: str = "<ctrl>+\\"
     hotkey_clear: str = "<ctrl>+r"
     hotkey_settings: str = "<ctrl>+<shift>+s"
