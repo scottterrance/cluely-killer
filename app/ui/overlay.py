@@ -89,10 +89,11 @@ class OverlayWindow(QWidget):
                 | Qt.WindowType.WindowStaysOnTopHint
             )
         self.setWindowOpacity(self.settings.opacity)
-        self.setMinimumSize(420, 240)
+        # Taller minimum so long answers are always fully visible.
+        self.setMinimumSize(420, 520)
         self.resize(
             max(self.settings.window_w, 420),
-            max(self.settings.window_h, 240),
+            max(self.settings.window_h, 600),
         )
 
     def place_on_screen(self) -> None:
@@ -212,13 +213,14 @@ class OverlayWindow(QWidget):
         self._live_transcript_view.setObjectName("liveTranscript")
         self._live_transcript_view.setOpenExternalLinks(False)
         self._live_transcript_view.setFrameShape(QFrame.Shape.NoFrame)
-        # Compact: max 3 lines tall (~60px), grows only if needed.
-        self._live_transcript_view.setMaximumHeight(72)
+        # Allow up to ~5 lines (~110px) so longer sentences are readable.
+        # No hard max - the panel will grow with content up to this soft cap.
+        self._live_transcript_view.setMaximumHeight(110)
         self._live_transcript_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         v.addWidget(self._live_transcript_header)
-        v.addWidget(self._live_transcript_view)
+        v.addWidget(self._live_transcript_view, stretch=0)
         # Show/hide based on setting
         self._apply_live_transcript_visibility()
 
@@ -295,15 +297,17 @@ class OverlayWindow(QWidget):
     @pyqtSlot(str)
     def _on_live_segment(self, text: str) -> None:
         """Append a new Whisper segment to the live transcript display.
-        Keeps a rolling window of ~400 chars so the panel stays compact.
+        NEVER clears - text accumulates permanently so the user can always
+        read back what was said. A rolling 800-char window keeps the panel
+        from growing unbounded while preserving recent context.
         """
         if not getattr(self.settings, "live_transcription_enabled", True):
             return
         self._live_transcript_text += (" " if self._live_transcript_text else "") + text.strip()
-        # Rolling window: keep only the last 400 chars so the panel
-        # doesn't grow unbounded and stays readable at a glance.
-        if len(self._live_transcript_text) > 400:
-            self._live_transcript_text = "..." + self._live_transcript_text[-380:]
+        # Rolling window: keep only the last 800 chars so the panel
+        # stays readable but never loses recent speech.
+        if len(self._live_transcript_text) > 800:
+            self._live_transcript_text = "\u2026 " + self._live_transcript_text[-760:]
         self._live_transcript_view.setHtml(
             f'<span style="color:#c8ced9;font-size:14px;">{self._live_transcript_text}</span>'
         )
@@ -314,12 +318,12 @@ class OverlayWindow(QWidget):
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
         """Called when a full answer-ready transcript is confirmed.
-        Resets the live panel and shows the confirmed question.
+        Does NOT clear the live panel - the user can keep reading the
+        accumulated transcript. Just updates the confirmed Q label.
         """
-        # Clear the live rolling display - the confirmed Q is now shown
-        self._live_transcript_text = ""
-        self._live_transcript_view.setHtml("")
-        display = text if len(text) <= 220 else "..." + text[-220:]
+        # Do NOT clear _live_transcript_text or the live panel here.
+        # The user explicitly wants to keep reading what was said.
+        display = text if len(text) <= 220 else "\u2026" + text[-220:]
         self.question_label.setText(f"Q: {display}")
 
     @pyqtSlot()

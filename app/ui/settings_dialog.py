@@ -73,8 +73,12 @@ class SettingsDialog(QDialog):
         self._suppress_persona_signal = False
 
         self.setWindowTitle("cluely-killer - Settings")
-        # Compact: 640 wide, 580 tall - enough for all tabs without wasting space.
-        self.resize(640, 580)
+        # Smart size: 560 wide x 640 tall.
+        # The AI Provider tab is the tallest (many rows) so 640px height
+        # avoids a scrollbar. 560px width is enough for all labels without
+        # the dialog feeling like a spreadsheet.
+        self.resize(560, 640)
+        self.setMaximumWidth(620)  # never wider than this
 
         tabs = QTabWidget()
         tabs.addTab(self._provider_tab(), "AI Provider")
@@ -111,12 +115,14 @@ class SettingsDialog(QDialog):
         self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.deepseek_model = QLineEdit(self.settings.deepseek_model)
         self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
-        f.addRow(QLabel(
+        info_lbl = QLabel(
             "<b>DeepSeek (cloud LLM, ~$0.14/M tokens)</b>"
-            "<br><i>Get a key at <code>https://platform.deepseek.com/api_keys</code>. "
-            "Models: <code>deepseek-chat</code> (V3, fast - recommended) or "
-            "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
-        ))
+            "<br><i>Key: <code>platform.deepseek.com/api_keys</code>. "
+            "Models: <code>deepseek-chat</code> (V3, fast) or "
+            "<code>deepseek-reasoner</code> (R1, deep reasoning).</i>"
+        )
+        info_lbl.setWordWrap(True)
+        f.addRow(info_lbl)
         f.addRow("DeepSeek API key:", self.deepseek_key)
         f.addRow("DeepSeek model:", self.deepseek_model)
         f.addRow("DeepSeek base URL:", self.deepseek_base_url)
@@ -136,11 +142,9 @@ class SettingsDialog(QDialog):
         bi = self.brevity_combo.findData(self.settings.answer_brevity)
         self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 1)
         f.addRow("Answer length:", self.brevity_combo)
-        f.addRow(QLabel(
-            "<i><b>Brief/Concise</b> = fastest replies. "
-            "<b>Deep</b> = full technical depth for drill-down questions "
-            "(trade-offs, edge cases, internals). Switch mid-interview as needed.</i>"
-        ))
+        _wl1 = QLabel("<i><b>Brief/Concise</b> = fastest. <b>Deep</b> = full technical depth for drill-downs. Switch mid-interview.</i>")
+        _wl1.setWordWrap(True)
+        f.addRow(_wl1)
 
         # Speculative pre-generation: start answering on the interviewer's
         # pause, BEFORE the key press, so the answer appears instantly.
@@ -149,13 +153,9 @@ class SettingsDialog(QDialog):
         )
         self.speculative_check.setChecked(self.settings.speculative_enabled)
         f.addRow(self.speculative_check)
-        f.addRow(QLabel(
-            "<i>When the interviewer <b>pauses</b> (likely finished asking), the "
-            "app starts generating the <b>'1' (short)</b> answer in the "
-            "background. Press '1' and it's already (mostly) done - hiding "
-            "DeepSeek's typing time behind the pause. Uses a few extra tokens "
-            "on guesses you skip. Needs continuous transcription on.</i>"
-        ))
+        _wl2 = QLabel("<i>On pause, pre-generates the '1' answer in background. Press '1' and it's already done. Needs continuous transcription on.</i>")
+        _wl2.setWordWrap(True)
+        f.addRow(_wl2)
 
         # RAG: inject only the resume parts relevant to each question
         # (sharper answers + slightly faster) when the resume is large.
@@ -175,14 +175,9 @@ class SettingsDialog(QDialog):
         ci = self.context_mode_combo.findData(self.settings.context_mode)
         self.context_mode_combo.setCurrentIndex(ci if ci >= 0 else 0)
         f.addRow("Key '2' memory:", self.context_mode_combo)
-        f.addRow(QLabel(
-            "<i><b>Smart resume retrieval</b> sends only the 2-3 resume parts "
-            "most relevant to the question (kicks in for longer resumes) so "
-            "answers are specific, not generic.<br>"
-            "<b>Key '2' memory</b> controls how follow-ups remember earlier "
-            "answers: <b>Smart</b> sends a short digest (faster); <b>Full</b> "
-            "replays the last 5 Q&A word-for-word.</i>"
-        ))
+        _wl3 = QLabel("<i><b>Smart retrieval</b>: only the relevant resume parts per question.<br><b>Key '2' memory</b>: Smart = short digest; Full = last 5 Q&amp;A verbatim.</i>")
+        _wl3.setWordWrap(True)
+        f.addRow(_wl3)
 
         # Semantic cache: reuse answers for repeated questions (instant).
         self.semcache_check = QCheckBox(
@@ -190,18 +185,13 @@ class SettingsDialog(QDialog):
         )
         self.semcache_check.setChecked(self.settings.semantic_cache_enabled)
         f.addRow(self.semcache_check)
-        f.addRow(QLabel(
-            "<i>Common questions ('tell me about yourself', 'why this company') "
-            "recur a lot. The first time, the answer is generated and saved; "
-            "after that a near-identical question is answered <b>instantly</b> "
-            "from the cache - no LLM wait. Affects key '1' only; clears "
-            "automatically when your resume/JD/context changes.</i>"
-        ))
+        _wl4 = QLabel("<i>Repeated questions answered <b>instantly</b> from cache. Clears when resume/JD changes.</i>")
+        _wl4.setWordWrap(True)
+        f.addRow(_wl4)
 
-        f.addRow(QLabel(
-            "<hr><i>Transcription is done by the bundled <b>local</b> Whisper "
-            "model (offline). Configure it on the <b>Audio / STT</b> tab.</i>"
-        ))
+        _wl5 = QLabel("<hr><i>Transcription: local Whisper model (offline). Configure on <b>Audio / STT</b> tab.</i>")
+        _wl5.setWordWrap(True)
+        f.addRow(_wl5)
         return w
 
     def _context_tab(self) -> QWidget:
