@@ -152,11 +152,6 @@ class OverlayWindow(QWidget):
         self.status_label.setObjectName("status")
         header.addWidget(self.status_label)
 
-        self.mem_label = QLabel("mem 0")
-        self.mem_label.setObjectName("memBadge")
-        self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
-        header.addWidget(self.mem_label)
-
         # Question type badge: shows auto-classified type of last question.
         self.qtype_label = QLabel("")
         self.qtype_label.setObjectName("qtypeBadge")
@@ -171,15 +166,13 @@ class OverlayWindow(QWidget):
         self.filler_label.setVisible(False)
         header.addWidget(self.filler_label)
 
-        # Ground-truth engine badge: shows which STT path + LLM produced
-        # the last answer (local continuous / local on-press, + DeepSeek).
-        self.backend_label = QLabel("engine: -")
-        self.backend_label.setObjectName("backendBadge")
+        # Hidden labels kept for internal signal wiring but not shown in UI.
+        # mem and backend info is available via status_label tooltip.
+        self.mem_label = QLabel("")
+        self.mem_label.setVisible(False)
+        self.backend_label = QLabel("")
         self.backend_label.setProperty("alarm", "false")
-        self.backend_label.setToolTip(
-            "Which engines produced the last answer. Updates after every press."
-        )
-        header.addWidget(self.backend_label)
+        self.backend_label.setVisible(False)
 
         header.addStretch()
 
