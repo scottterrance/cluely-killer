@@ -32,16 +32,107 @@ from PyQt6.QtWidgets import (
 from ..config import Settings
 from ..core.controller import Controller
 from ..core.analysis import FillerReport, ClassificationResult
+from ..prompts.builder import SECTION_TAGS, ALL_TAGS
 from .styles import APP_QSS
 
-# Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
-# over '=' / '*' boundaries on partial streams.
-_RED_RE = re.compile(r"==(.+?)==", flags=re.DOTALL)
+# ── Inline highlight regexes ───────────────────────────────────────────────
+_RED_RE  = re.compile(r"==(.+?)==",     flags=re.DOTALL)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
+_RED_STYLE  = 'color:#FF6B6B;font-weight:700;'
+_BOLD_STYLE = 'color:#FFD166;font-weight:700;'
 
-_RED_STYLE = 'color:#FF6B6B;font-weight:700;'
+# ── Section tag parser ─────────────────────────────────────────────────────
+# Matches lines like:  [POINT] some text   or   [S] some text
+_TAG_LINE_RE = re.compile(
+    r'^\s*\[(' + '|'.join(re.escape(t) for t in ALL_TAGS) + r')\]\s*(.*)',
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
+def _inline_highlights(text: str) -> str:
+    """Apply ==red== and **yellow** inline highlights to a text fragment."""
+    text = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+    text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
+    text = _BOLD_RE.sub(rf'<span style="{_BOLD_STYLE}">\1</span>', text)
+    return text
+
+
+def _section_to_html(tag: str, body: str) -> str:
+    """Render one tagged section as a visually distinct HTML block."""
+    tag_upper = tag.upper()
+    label, color = SECTION_TAGS.get(tag_upper, (tag_upper, "#7CC8FF"))
+    pill = (
+        f'<span style="'
+        f'color:{color};'
+        f'font-size:9px;font-weight:800;letter-spacing:0.8px;'
+        f'background:rgba(255,255,255,0.07);'
+        f'border-radius:3px;padding:1px 6px;'
+        f'border-left:2px solid {color};">'
+        f'{label}</span>'
+    )
+    body_html = _inline_highlights(body.strip())
+    return (
+        f'<div style="'
+        f'margin:0 0 9px 0;'
+        f'padding:7px 10px 7px 10px;'
+        f'border-left:3px solid {color};'
+        f'background:rgba(255,255,255,0.04);'
+        f'border-radius:0 4px 4px 0;">'
+        f'{pill}&nbsp;&nbsp;'
+        f'<span style="color:#f1f3f5;font-size:14px;line-height:1.55;">{body_html}</span>'
+        f'</div>'
+    )
+
+
+def _answer_to_html(text: str) -> str:
+    """Convert a full answer (possibly mid-stream) to structured HTML.
+
+    Lines matching [TAG] are rendered as colored section blocks.
+    Any leading prose before the first tag is rendered as plain text
+    so the display is never blank during early streaming.
+    """
+    if not text:
+        return ""
+
+    matches = list(_TAG_LINE_RE.finditer(text))
+
+    if not matches:
+        # No tags yet (streaming hasn't produced one) — render as plain text
+        plain = _inline_highlights(text.strip())
+        return (
+            f'<div style="color:#f1f3f5;font-size:14px;'
+            f'padding:4px 2px;line-height:1.55;">'
+            f'{plain}</div>'
+        )
+
+    html_parts: list[str] = []
+
+    # Any text before the first tag
+    pre = text[:matches[0].start()].strip()
+    if pre:
+        html_parts.append(
+            f'<div style="color:#9aa3b2;font-size:13px;'
+            f'padding:2px 4px 6px 4px;">'
+            f'{_inline_highlights(pre)}</div>'
+        )
+
+    for i, m in enumerate(matches):
+        tag = m.group(1).upper()
+        if i + 1 < len(matches):
+            body = text[m.end():matches[i + 1].start()].strip()
+        else:
+            body = text[m.end():].strip()
+        # Always render the section block (even if body is empty mid-stream)
+        html_parts.append(_section_to_html(tag, body))
+
+    return "".join(html_parts)
+
+
+# Legacy alias — used by live transcript panel (plain text, no section tags)
 def _md_to_html(text: str) -> str:
     text = (
         text.replace("&", "&amp;")
@@ -49,7 +140,7 @@ def _md_to_html(text: str) -> str:
         .replace(">", "&gt;")
     )
     text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
-    text = _BOLD_RE.sub(r"<b>\1</b>", text)
+    text = _BOLD_RE.sub(rf'<span style="{_BOLD_STYLE}">\1</span>', text)
     return text.replace("\n", "<br>")
 
 
@@ -356,7 +447,7 @@ class OverlayWindow(QWidget):
         # If the user has scrolled down at all, track that intent.
         if sb.value() > 4:
             self._user_scrolled_down = True
-        self.answer_view.setHtml(_md_to_html(self._answer_text))
+        self.answer_view.setHtml(_answer_to_html(self._answer_text))
         # setHtml() always resets the scrollbar to 0 internally.
         # We use a zero-delay timer so Qt finishes layout BEFORE we
         # restore the position - otherwise maximum() is still 0.
