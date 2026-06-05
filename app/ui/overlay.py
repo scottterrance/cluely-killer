@@ -122,10 +122,16 @@ def _answer_to_html(text: str) -> str:
 
     for i, m in enumerate(matches):
         tag = m.group(1).upper()
+        # group(2) = text on the SAME line as the tag (e.g. "[S] text here")
+        inline = m.group(2).strip()
+        # Also grab any continuation lines between this tag and the next
+        # (in case DeepSeek wraps a long sentence onto a second line)
         if i + 1 < len(matches):
-            body = text[m.end():matches[i + 1].start()].strip()
+            continuation = text[m.end():matches[i + 1].start()].strip()
         else:
-            body = text[m.end():].strip()
+            continuation = text[m.end():].strip()
+        # Combine: inline text first, then any continuation
+        body = (inline + (" " + continuation if continuation else "")).strip()
         # Always render the section block (even if body is empty mid-stream)
         html_parts.append(_section_to_html(tag, body))
 
