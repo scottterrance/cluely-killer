@@ -67,9 +67,9 @@ class DeepSeekProvider(LLMProvider):
             "model": self.model,
             "messages": msgs,
             "stream": True,
-            "temperature": 0.6,
-            "max_tokens": 400,
-            "top_p": 0.95,
+            "temperature": 0.55,
+            "max_tokens": 600,
+            "top_p": 0.90,
         }
 
         try:
