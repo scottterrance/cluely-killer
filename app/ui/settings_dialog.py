@@ -132,9 +132,20 @@ class SettingsDialog(QDialog):
             "(e.g. 'Stripe Senior PM' / 'Junior Dev') with one click.</i>"
         ))
 
-        v.addWidget(QLabel("About me (1-3 sentences):"))
+        v.addWidget(QLabel("About me (your interview identity - the richer, the better):"))
         self.about_edit = QTextEdit(self.settings.about_me)
-        self.about_edit.setMaximumHeight(70)
+        self.about_edit.setPlaceholderText(
+            "Example: I'm a senior backend engineer with 6 years in "
+            "fintech. My superpower is turning messy legacy systems into "
+            "clean, observable microservices — at Acme I migrated 120 "
+            "endpoints to gRPC, cutting p99 latency from 800ms to 90ms. "
+            "Core stack: Python, Go, PostgreSQL, Kafka, AWS. I lead "
+            "through context-sharing and high-trust delegation. Moving "
+            "because I want to apply infrastructure expertise to climate "
+            "tech. Outside work I maintain an open-source time-series "
+            "compression library (2K GitHub stars)."
+        )
+        self.about_edit.setMaximumHeight(100)
         v.addWidget(self.about_edit)
 
         # Resume row: label + Import button on the right.
@@ -170,9 +181,18 @@ class SettingsDialog(QDialog):
         self.job_edit.setMaximumHeight(120)
         v.addWidget(self.job_edit)
 
-        v.addWidget(QLabel("Custom system prompt (advanced - appended to base rules):"))
+        v.addWidget(QLabel("Custom system prompt (advanced - fine-tune answer style):"))
         self.custom_edit = QTextEdit(self.settings.custom_system_prompt)
-        self.custom_edit.setMaximumHeight(80)
+        self.custom_edit.setPlaceholderText(
+            "Example: I am interviewing for a SENIOR role — calibrate "
+            "depth and vocabulary accordingly. Use 'we' for team wins, "
+            "'I' for individual contributions. When discussing technical "
+            "topics, lean practical over theoretical and always connect "
+            "decisions to business impact. If I don't know something, "
+            "be honest but pivot to related knowledge. End answers with "
+            "a forward-looking hook when appropriate."
+        )
+        self.custom_edit.setMaximumHeight(100)
         v.addWidget(self.custom_edit)
         return w
 
