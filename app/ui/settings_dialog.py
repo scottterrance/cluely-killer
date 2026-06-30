@@ -146,6 +146,19 @@ class SettingsDialog(QDialog):
         _wl1.setWordWrap(True)
         f.addRow(_wl1)
 
+        # Interview mode: re-weights what every answer optimizes for to match
+        # the interviewer's true intent. Same format + same single LLM call.
+        from ..prompts.builder import INTERVIEW_MODE_LABELS
+        self.mode_combo = QComboBox()
+        for val in ("balanced", "recruiter", "hiring_manager", "technical"):
+            self.mode_combo.addItem(INTERVIEW_MODE_LABELS[val], val)
+        mi = self.mode_combo.findData(self.settings.interview_mode)
+        self.mode_combo.setCurrentIndex(mi if mi >= 0 else 0)
+        f.addRow("Interview mode:", self.mode_combo)
+        _wlm = QLabel("<i>Tunes answers to who's interviewing. <b>Recruiter</b>=business value, <b>Hiring Manager</b>=delivery, <b>Technical</b>=engineering depth. Switch mid-interview.</i>")
+        _wlm.setWordWrap(True)
+        f.addRow(_wlm)
+
         # Speculative pre-generation: start answering on the interviewer's
         # pause, BEFORE the key press, so the answer appears instantly.
         self.speculative_check = QCheckBox(
@@ -604,6 +617,7 @@ class SettingsDialog(QDialog):
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
         s.answer_brevity = self.brevity_combo.currentData() or "concise"
+        s.interview_mode = self.mode_combo.currentData() or "balanced"
         s.speculative_enabled = self.speculative_check.isChecked()
         s.use_rag = self.rag_check.isChecked()
         s.context_mode = self.context_mode_combo.currentData() or "smart"

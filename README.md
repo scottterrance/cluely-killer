@@ -11,6 +11,8 @@ that **does not appear in screen-share captures**.
 - **STT: bundled.** Whisper `small` ships inside the .exe folder. Zero downloads, ever, on any machine.
 - **LLM: DeepSeek only.** OpenAI-compatible API, ~$0.14 per million tokens (cents per interview).
 - **All your context in one place.** About-me, resume, job description, custom system prompt — editable from Settings.
+- **Hiring-probability prompt.** Every answer opens with one self-complete `PRIMARY` sentence, obeys a strict information budget, and is tuned to spoken (not written) English — all in a single LLM call.
+- **Interview modes.** Recruiter / Hiring Manager / Technical / Balanced re-weight each answer to the interviewer's true intent without changing the UI, format, or latency.
 
 > Use this on yourself only. Recording or transcribing other people without consent may be illegal in your jurisdiction.
 

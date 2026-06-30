@@ -46,6 +46,15 @@ class Settings:
     #   "deep"     - 6-10 sentences (~600 token cap). Full technical depth.
     answer_brevity: str = "concise"
 
+    # Interview mode re-weights what each answer optimizes for, matching the
+    # interviewer's true intent. Same UI, same format, same single LLM call —
+    # only the priority block in the system prompt changes.
+    #   "balanced"       - adapts to the question (default)
+    #   "recruiter"      - communication, confidence, business value
+    #   "hiring_manager" - ownership, execution, delivery
+    #   "technical"      - engineering, architecture, trade-offs
+    interview_mode: str = "balanced"
+
     # ---- Retrieval / context (roadmap #9) ----
     # RAG over the resume: when the resume is large, inject only the 2-3
     # chunks most relevant to the current question instead of the whole

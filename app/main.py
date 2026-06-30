@@ -211,6 +211,7 @@ def main() -> None:
             settings.about_me,
             settings.custom_system_prompt,
             settings.answer_brevity,
+            settings.interview_mode,
         )
         semantic_cache.set_fingerprint(fp)
 
@@ -262,6 +263,7 @@ def main() -> None:
             brevity=s.answer_brevity,
             resume_snippets=snippets,
             brief=brief,
+            interview_mode=s.interview_mode,
         )
 
     scheduler = ExampleScheduler()

@@ -62,9 +62,38 @@ def _inline_highlights(text: str) -> str:
 
 
 def _section_to_html(tag: str, body: str) -> str:
-    """Render one tagged section as a visually distinct HTML block."""
+    """Render one tagged section as a visually distinct HTML block.
+
+    The [PRIMARY] section gets the strongest emphasis: it is the one
+    self-complete sentence the candidate should speak first, so it is
+    rendered larger, brighter, and with a heavier accent than the
+    supporting sections below it.
+    """
     tag_upper = tag.upper()
     label, color = SECTION_TAGS.get(tag_upper, (tag_upper, "#7CC8FF"))
+
+    if tag_upper == "PRIMARY":
+        pill = (
+            f'<span style="'
+            f'color:#1a1a1a;'
+            f'font-size:10px;font-weight:800;letter-spacing:1px;'
+            f'background:{color};'
+            f'border-radius:3px;padding:2px 8px;">'
+            f'{label}</span>'
+        )
+        body_html = _inline_highlights(body.strip())
+        return (
+            f'<div style="'
+            f'margin:0 0 12px 0;'
+            f'padding:10px 12px 11px 12px;'
+            f'border-left:5px solid {color};'
+            f'background:rgba(255,209,102,0.12);'
+            f'border-radius:0 5px 5px 0;">'
+            f'{pill}&nbsp;&nbsp;'
+            f'<span style="color:#ffffff;font-size:17px;font-weight:700;line-height:1.5;">{body_html}</span>'
+            f'</div>'
+        )
+
     pill = (
         f'<span style="'
         f'color:{color};'
