@@ -22,6 +22,12 @@ Two lightweight, zero-token, zero-latency tools that run locally:
    The classifier also returns a recommended brevity hint so the
    controller can auto-suggest a depth level without the user having
    to switch manually.
+
+   Depth hints are aligned with the docx coaching principles:
+     - PRIMARY sentence first (self-complete)
+     - One metric, three ideas max
+     - Spoken English, not prose
+     - Hiring-probability test on every sentence
 """
 from __future__ import annotations
 
@@ -65,7 +71,7 @@ class FillerReport:
     unique_fillers: list[str]         # e.g. ["um", "like", "you know"]
     per_filler: dict[str, int]        # e.g. {"um": 3, "like": 5}
     confidence_score: int             # 0-100: 100 = no fillers (perfect clarity)
-    label: str                        # human-readable e.g. "Clear ✓" / "3 fillers"
+    label: str                        # human-readable e.g. "Clear" / "3 fillers"
 
 
 def detect_fillers(text: str) -> FillerReport:
@@ -239,12 +245,16 @@ _TYPE_LABELS: dict[QuestionType, str] = {
     "GENERAL":       "· General",
 }
 
+# Depth hints aligned with docx coaching principles:
+# - Lead with PRIMARY (self-complete sentence)
+# - One metric, three ideas max
+# - Hiring-probability test on every sentence
 _TYPE_HINTS: dict[QuestionType, str] = {
-    "BEHAVIOURAL":   "Use STAR: Situation → Task → Action → Result",
-    "TECHNICAL":     "State approach, complexity, real-world implication",
-    "SYSTEM_DESIGN": "Constraints → Options → Trade-offs → Decision",
-    "CULTURE_FIT":   "Be specific, authentic, connect to their mission",
-    "SALARY":        "Give a range, anchor high, mention total comp",
+    "BEHAVIOURAL":   "PRIMARY → STAR. One metric in [A] or [R]. 3 ideas max.",
+    "TECHNICAL":     "PRIMARY → HOW → WHY → RESULT. Name the trade-off.",
+    "SYSTEM_DESIGN": "PRIMARY → NEED → OPT → PICK → TRADE. One number.",
+    "CULTURE_FIT":   "PRIMARY → WHY → CLOSE. Be specific, connect to their mission.",
+    "SALARY":        "PRIMARY: give a range, anchor high, mention total comp.",
     "GENERAL":       "",
 }
 

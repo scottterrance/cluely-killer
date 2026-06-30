@@ -133,21 +133,28 @@ class SettingsDialog(QDialog):
         # difference between a ~4s and a ~1.5s answer.
         self.brevity_combo = QComboBox()
         for label, val in [
-            ("Brief - 1-2 sentences (ultra-fast)", "brief"),
-            ("Concise - 2-4 sentences (fast, default)", "concise"),
-            ("Detailed - 4-7 sentences (thorough)", "detailed"),
-            ("Deep - 6-10 sentences (full technical depth)", "deep"),
+            ("Brief — PRIMARY only, ultra-fast (screening, salary)", "brief"),
+            ("Concise — 2-4 sections, fast (default, most questions)", "concise"),
+            ("Detailed — 3-5 sections, thorough (technical drill-downs)", "detailed"),
+            ("Deep — 4-6 sections, full depth (system design, architecture)", "deep"),
         ]:
             self.brevity_combo.addItem(label, val)
         bi = self.brevity_combo.findData(self.settings.answer_brevity)
         self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 1)
-        f.addRow("Answer length:", self.brevity_combo)
-        _wl1 = QLabel("<i><b>Brief/Concise</b> = fastest. <b>Deep</b> = full technical depth for drill-downs. Switch mid-interview.</i>")
+        f.addRow("Answer depth:", self.brevity_combo)
+        _wl1 = QLabel(
+            "<i>Controls how much the model generates — not quality, just length. "
+            "<b>Brief</b> = fastest, PRIMARY sentence only. "
+            "<b>Deep</b> = full technical depth with trade-offs. "
+            "Switch mid-interview without restarting.</i>"
+        )
         _wl1.setWordWrap(True)
         f.addRow(_wl1)
 
         # Interview mode: re-weights what every answer optimizes for to match
         # the interviewer's true intent. Same format + same single LLM call.
+        # Each mode changes the internal priority block in the prompt but
+        # preserves the tagged section format and single-call architecture.
         from ..prompts.builder import INTERVIEW_MODE_LABELS
         self.mode_combo = QComboBox()
         for val in ("balanced", "recruiter", "hiring_manager", "technical"):
@@ -155,7 +162,13 @@ class SettingsDialog(QDialog):
         mi = self.mode_combo.findData(self.settings.interview_mode)
         self.mode_combo.setCurrentIndex(mi if mi >= 0 else 0)
         f.addRow("Interview mode:", self.mode_combo)
-        _wlm = QLabel("<i>Tunes answers to who's interviewing. <b>Recruiter</b>=business value, <b>Hiring Manager</b>=delivery, <b>Technical</b>=engineering depth. Switch mid-interview.</i>")
+        _wlm = QLabel(
+            "<i>Tunes every answer to the interviewer's silent question.<br>"
+            "<b>Recruiter</b>: \"Can I move this candidate forward?\" — communication, confidence, business value.<br>"
+            "<b>Hiring Manager</b>: \"Can this person deliver?\" — ownership, execution, delivery.<br>"
+            "<b>Technical</b>: \"Does this person understand the tech?\" — depth, trade-offs, correctness.<br>"
+            "<b>Balanced</b>: auto-adapts to each question. Switch mid-interview.</i>"
+        )
         _wlm.setWordWrap(True)
         f.addRow(_wlm)
 
@@ -242,9 +255,16 @@ class SettingsDialog(QDialog):
             "(e.g. 'Stripe Senior PM' / 'Junior Dev') with one click.</i>"
         ))
 
-        v.addWidget(QLabel("About me (1-3 sentences):"))
+        v.addWidget(QLabel(
+            "About me (2-4 sentences — who you are, your strongest fact, your role):"
+        ))
         self.about_edit = QTextEdit(self.settings.about_me)
         self.about_edit.setMaximumHeight(70)
+        self.about_edit.setPlaceholderText(
+            "e.g. I'm a senior backend engineer with 6 years building distributed systems. "
+            "I led the migration from monolith to microservices at Acme, cutting deploy time by 60%. "
+            "I'm applying for the Staff Engineer role on your platform team."
+        )
         v.addWidget(self.about_edit)
 
         # Resume row: label + Import button on the right.
@@ -280,9 +300,16 @@ class SettingsDialog(QDialog):
         self.job_edit.setMaximumHeight(120)
         v.addWidget(self.job_edit)
 
-        v.addWidget(QLabel("Custom system prompt (advanced - appended to base rules):"))
+        v.addWidget(QLabel(
+            "Custom instructions (optional — appended after base rules):"
+        ))
         self.custom_edit = QTextEdit(self.settings.custom_system_prompt)
         self.custom_edit.setMaximumHeight(80)
+        self.custom_edit.setPlaceholderText(
+            "Advanced: add extra constraints or context for the AI. "
+            "e.g. 'Always mention my open-source work on GitHub.' "
+            "Leave blank to use the default hiring-probability prompt."
+        )
         v.addWidget(self.custom_edit)
         return w
 

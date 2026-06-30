@@ -3,13 +3,18 @@
 Renders the LLM stream as it arrives. Two highlight conventions are
 recognized:
 
-  ==word==   -> RED   (most stressed keywords, 2-3 per sentence)
-  **word**   -> YELLOW (softer secondary emphasis, sparing)
+  ==word==   -> RED   (most stressed keywords: technologies, metrics, outcomes)
+  **word**   -> YELLOW (softer secondary emphasis — use sparingly)
 
-The header carries a STEALTH / VISIBLE badge so the candidate can verify
-at a glance that the overlay is hidden from screen capture before
-starting the interview, plus a small "mem N" badge showing how many
-prior Q+A turns the LLM is remembering.
+The header carries:
+  - STEALTH / VISIBLE badge (hidden from screen capture status)
+  - Interview mode badge (BALANCED / RECRUITER / HM / TECHNICAL)
+  - Question type badge (auto-classified)
+  - Filler word / clarity badge
+
+The PRIMARY section is rendered with maximum visual emphasis: gold
+background tint, larger font, bold — it is the one self-complete sentence
+the candidate must speak first.
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ from PyQt6.QtWidgets import (
 from ..config import Settings
 from ..core.controller import Controller
 from ..core.analysis import FillerReport, ClassificationResult
-from ..prompts.builder import SECTION_TAGS, ALL_TAGS
+from ..prompts.builder import SECTION_TAGS, ALL_TAGS, INTERVIEW_MODE_SHORT
 from .styles import APP_QSS
 
 # ── Inline highlight regexes ───────────────────────────────────────────────
@@ -64,10 +69,13 @@ def _inline_highlights(text: str) -> str:
 def _section_to_html(tag: str, body: str) -> str:
     """Render one tagged section as a visually distinct HTML block.
 
-    The [PRIMARY] section gets the strongest emphasis: it is the one
-    self-complete sentence the candidate should speak first, so it is
-    rendered larger, brighter, and with a heavier accent than the
-    supporting sections below it.
+    The [PRIMARY] section receives the strongest visual treatment:
+    gold background tint, larger font, heavier border, bold weight.
+    It is the one self-complete sentence the candidate speaks first —
+    if interrupted after it, the answer still sounds finished.
+
+    All other sections are rendered as colored side-bordered blocks
+    with a label pill, sized for comfortable glancing while speaking.
     """
     tag_upper = tag.upper()
     label, color = SECTION_TAGS.get(tag_upper, (tag_upper, "#7CC8FF"))
@@ -76,21 +84,23 @@ def _section_to_html(tag: str, body: str) -> str:
         pill = (
             f'<span style="'
             f'color:#1a1a1a;'
-            f'font-size:10px;font-weight:800;letter-spacing:1px;'
+            f'font-size:10px;font-weight:900;letter-spacing:1.5px;'
             f'background:{color};'
-            f'border-radius:3px;padding:2px 8px;">'
+            f'border-radius:4px;padding:3px 10px;">'
             f'{label}</span>'
         )
         body_html = _inline_highlights(body.strip())
         return (
             f'<div style="'
-            f'margin:0 0 12px 0;'
-            f'padding:10px 12px 11px 12px;'
-            f'border-left:5px solid {color};'
-            f'background:rgba(255,209,102,0.12);'
-            f'border-radius:0 5px 5px 0;">'
+            f'margin:0 0 14px 0;'
+            f'padding:12px 14px 13px 14px;'
+            f'border-left:6px solid {color};'
+            f'background:rgba(255,209,102,0.14);'
+            f'border-radius:0 6px 6px 0;'
+            f'box-shadow:0 2px 8px rgba(255,209,102,0.08);">'
             f'{pill}&nbsp;&nbsp;'
-            f'<span style="color:#ffffff;font-size:17px;font-weight:700;line-height:1.5;">{body_html}</span>'
+            f'<span style="color:#ffffff;font-size:18px;font-weight:700;'
+            f'line-height:1.5;letter-spacing:0.1px;">{body_html}</span>'
             f'</div>'
         )
 
@@ -204,6 +214,7 @@ class OverlayWindow(QWidget):
         self._build_ui()
         self._wire_signals()
         self.update_stealth_badge(settings.exclude_from_capture)
+        self.update_mode_badge(getattr(settings, "interview_mode", "balanced"))
 
     # ------------------------------------------------------------------
     def _setup_window(self) -> None:
@@ -278,6 +289,15 @@ class OverlayWindow(QWidget):
         self.status_label.setObjectName("status")
         header.addWidget(self.status_label)
 
+        # Interview mode badge: shows the active interview mode.
+        self.mode_label = QLabel("")
+        self.mode_label.setObjectName("modeBadge")
+        self.mode_label.setToolTip(
+            "Active interview mode. Change in Settings → Answer Quality."
+        )
+        self.mode_label.setVisible(True)
+        header.addWidget(self.mode_label)
+
         # Question type badge: shows auto-classified type of last question.
         self.qtype_label = QLabel("")
         self.qtype_label.setObjectName("qtypeBadge")
@@ -349,7 +369,6 @@ class OverlayWindow(QWidget):
         self._live_transcript_view.setOpenExternalLinks(False)
         self._live_transcript_view.setFrameShape(QFrame.Shape.NoFrame)
         # Allow up to ~5 lines (~110px) so longer sentences are readable.
-        # No hard max - the panel will grow with content up to this soft cap.
         self._live_transcript_view.setMaximumHeight(110)
         self._live_transcript_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
@@ -376,11 +395,11 @@ class OverlayWindow(QWidget):
     def _footer_text(self) -> str:
         rephrase_key = getattr(self.settings, "hotkey_rephrase", "3")
         return (
-            f"{self.settings.hotkey_answer_short} answer-only  \u00b7  "
+            f"{self.settings.hotkey_answer_short} answer  \u00b7  "
             f"{self.settings.hotkey_answer_context} answer+context  \u00b7  "
             f"{rephrase_key} rephrase  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
-            f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
+            f"{self.settings.hotkey_clear} clear  \u00b7  "
             f"{self.settings.hotkey_settings} settings"
         )
 
@@ -404,6 +423,33 @@ class OverlayWindow(QWidget):
         # Re-evaluate the [alarm] style selector.
         self.stealth_label.style().unpolish(self.stealth_label)
         self.stealth_label.style().polish(self.stealth_label)
+
+    def update_mode_badge(self, mode: str) -> None:
+        """Update the interview mode badge in the header."""
+        short = INTERVIEW_MODE_SHORT.get(mode, mode.upper())
+        self.mode_label.setText(short)
+        mode_tips = {
+            "balanced":       "Balanced — adapts to each question automatically",
+            "recruiter":      "Recruiter mode — optimizing for communication, confidence, business value",
+            "hiring_manager": "Hiring Manager mode — optimizing for ownership, execution, delivery",
+            "technical":      "Technical mode — optimizing for engineering depth, architecture, trade-offs",
+        }
+        self.mode_label.setToolTip(mode_tips.get(mode, f"Interview mode: {mode}"))
+        # Color the badge by mode
+        mode_colors = {
+            "balanced":       ("#c8ced9", "rgba(200,206,217,20)", "rgba(200,206,217,55)"),
+            "recruiter":      ("#7CC8FF", "rgba(124,200,255,20)", "rgba(124,200,255,55)"),
+            "hiring_manager": ("#FF9F43", "rgba(255,159,67,20)",  "rgba(255,159,67,55)"),
+            "technical":      ("#a78bfa", "rgba(167,139,250,20)", "rgba(167,139,250,55)"),
+        }
+        fg, bg, border = mode_colors.get(mode, mode_colors["balanced"])
+        self.mode_label.setStyleSheet(
+            f"color:{fg};"
+            f"background-color:{bg};"
+            f"font-size:9px;font-weight:700;letter-spacing:0.5px;"
+            f"padding:2px 7px;border-radius:8px;"
+            f"border:1px solid {border};"
+        )
 
     # ------------------------------------------------------------------
     def _apply_live_transcript_visibility(self) -> None:
@@ -460,8 +506,6 @@ class OverlayWindow(QWidget):
         Does NOT clear the live panel - the user can keep reading the
         accumulated transcript. Just updates the confirmed Q label.
         """
-        # Do NOT clear _live_transcript_text or the live panel here.
-        # The user explicitly wants to keep reading what was said.
         display = text if len(text) <= 220 else "\u2026" + text[-220:]
         self.question_label.setText(f"Q: {display}")
 
@@ -562,6 +606,10 @@ class OverlayWindow(QWidget):
         if result.depth_hint:
             self.status_label.setText(result.depth_hint)
             QTimer.singleShot(3500, lambda: self.status_label.setText("Answering..."))
+
+    def refresh_mode_badge(self) -> None:
+        """Called after settings save to update the mode badge."""
+        self.update_mode_badge(getattr(self.settings, "interview_mode", "balanced"))
 
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)

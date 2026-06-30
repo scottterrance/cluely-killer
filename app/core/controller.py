@@ -269,17 +269,15 @@ class Controller(QObject):
 
             # Build a rephrase system prompt: same persona rules but
             # instruct the model to use a different structure / example.
+            from ..prompts.builder import build_rephrase_suffix
             rephrase_system = self.prompt_builder(
                 self.settings,
                 include_example=True,   # always include an example on rephrase
                 question=transcript,
                 brief="",
-            ) + (
-                "\n\nREPHRASE INSTRUCTION: The candidate already gave this answer: "
-                f"\"\"\"\n{prev_answer[:400]}\n\"\"\"\n"
-                "Give a DIFFERENT version: different opening, different structure, "
-                "different concrete example or metric. Same facts, fresh delivery. "
-                "Do NOT repeat the previous answer verbatim."
+            ) + build_rephrase_suffix() + (
+                "\nThe previous answer to avoid:\n"
+                f"\"\"\"\n{prev_answer[:400]}\n\"\"\""
             )
 
             llm = self.llm_factory(self.settings)

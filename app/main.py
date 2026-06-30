@@ -312,6 +312,8 @@ def main() -> None:
             _refresh_cache_fingerprint()
             # Apply live transcription toggle live (no restart needed).
             overlay.refresh_live_transcript_setting()
+            # Refresh the interview mode badge in the header.
+            overlay.refresh_mode_badge()
 
     overlay = OverlayWindow(
         settings,
