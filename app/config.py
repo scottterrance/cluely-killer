@@ -179,6 +179,10 @@ class Settings:
     hotkey_clear: str = "<ctrl>+r"
     hotkey_settings: str = "<ctrl>+<shift>+s"
     hotkey_quit: str = "<ctrl>+<shift>+q"
+    # Toggle the standalone chatbot window (show/hide).
+    hotkey_chatbot_toggle: str = "<ctrl>+<shift>+c"
+    # Toggle the text file viewer window (show/hide).
+    hotkey_textviewer_toggle: str = "<ctrl>+<shift>+t"
 
     # ---- User context (injected into system prompt) ----
     about_me: str = ""

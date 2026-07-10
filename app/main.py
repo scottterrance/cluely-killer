@@ -79,6 +79,8 @@ def main() -> None:
         clear_requested = pyqtSignal()
         settings_requested = pyqtSignal()
         quit_requested = pyqtSignal()
+        chatbot_toggle_requested = pyqtSignal()
+        textviewer_toggle_requested = pyqtSignal()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -229,6 +231,8 @@ def main() -> None:
     from .stealth.windows import exclude_window_from_capture
     from .ui.overlay import OverlayWindow
     from .ui.settings_dialog import SettingsDialog
+    from .ui.chatbot import ChatbotWindow
+    from .ui.text_viewer import TextViewerWindow
 
     def _llm_factory(s) -> LLMProvider:
         return DeepSeekProvider(
@@ -327,9 +331,37 @@ def main() -> None:
     _say("overlay.show() returned; placing on screen...")
     overlay.place_on_screen()
 
+    # ---- Chatbot window (hidden on start) ----
+    _say("building chatbot window...")
+    chatbot_window = ChatbotWindow(settings=settings, simple_mode=simple_mode)
+    # Place chatbot to the right of the main overlay
+    chatbot_window.move(
+        overlay.x() + overlay.width() + 10,
+        overlay.y(),
+    )
+    # Start hidden - user shows it with the hotkey
+    chatbot_window.hide()
+    _say("chatbot window built (hidden).")
+
+    # ---- Text viewer window (hidden on start) ----
+    _say("building text viewer window...")
+    text_viewer_window = TextViewerWindow(settings=settings, simple_mode=simple_mode)
+    # Place text viewer below the chatbot
+    text_viewer_window.move(
+        overlay.x() + overlay.width() + 10,
+        overlay.y() + chatbot_window.height() + 10,
+    )
+    # Start hidden - user shows it with the hotkey
+    text_viewer_window.hide()
+    _say("text viewer window built (hidden).")
+
     stealth_active = False
     if settings.exclude_from_capture:
         ok = exclude_window_from_capture(int(overlay.winId()), True)
+        # Apply stealth to chatbot and text viewer too so they are also
+        # hidden from Zoom / Teams / Meet / OBS screen capture.
+        exclude_window_from_capture(int(chatbot_window.winId()), True)
+        exclude_window_from_capture(int(text_viewer_window.winId()), True)
         if not ok and sys.platform == "win32":
             _say("WDA_EXCLUDEFROMCAPTURE failed - needs Windows 10 build 19041+.")
         else:
@@ -361,9 +393,15 @@ def main() -> None:
     dispatcher.clear_requested.connect(controller.clear, qc)
     dispatcher.settings_requested.connect(open_settings_dialog, qc)
     dispatcher.quit_requested.connect(app.quit, qc)
+    dispatcher.chatbot_toggle_requested.connect(
+        lambda: chatbot_window.toggle_visibility(), qc
+    )
+    dispatcher.textviewer_toggle_requested.connect(
+        lambda: text_viewer_window.toggle_visibility(), qc
+    )
 
     def apply_hotkeys() -> None:
-        hotkeys.set_hotkeys({
+        mapping = {
             settings.hotkey_answer_short: dispatcher.answer_short_requested.emit,
             settings.hotkey_answer_context: dispatcher.answer_context_requested.emit,
             settings.hotkey_rephrase: dispatcher.rephrase_requested.emit,
@@ -371,7 +409,15 @@ def main() -> None:
             settings.hotkey_clear: dispatcher.clear_requested.emit,
             settings.hotkey_settings: dispatcher.settings_requested.emit,
             settings.hotkey_quit: dispatcher.quit_requested.emit,
-        })
+        }
+        # New window hotkeys (guarded with getattr for old config files)
+        chatbot_hk = getattr(settings, "hotkey_chatbot_toggle", "<ctrl>+<shift>+c")
+        textviewer_hk = getattr(settings, "hotkey_textviewer_toggle", "<ctrl>+<shift>+t")
+        if chatbot_hk:
+            mapping[chatbot_hk] = dispatcher.chatbot_toggle_requested.emit
+        if textviewer_hk:
+            mapping[textviewer_hk] = dispatcher.textviewer_toggle_requested.emit
+        hotkeys.set_hotkeys(mapping)
 
     apply_hotkeys()
     _say("hotkeys registered.")
@@ -397,6 +443,8 @@ def main() -> None:
         tray.setToolTip("cluely-killer")
         tray_menu = QMenu()
         tray_menu.addAction("Show / hide overlay", overlay.toggle_visibility)
+        tray_menu.addAction("Show / hide chatbot", chatbot_window.toggle_visibility)
+        tray_menu.addAction("Show / hide text viewer", text_viewer_window.toggle_visibility)
         tray_menu.addAction("Settings...", open_settings_dialog)
         tray_menu.addSeparator()
         tray_menu.addAction("Quit", app.quit)

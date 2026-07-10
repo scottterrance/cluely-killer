@@ -582,12 +582,20 @@ class SettingsDialog(QDialog):
         self.hk_clear = QLineEdit(self.settings.hotkey_clear)
         self.hk_settings = QLineEdit(self.settings.hotkey_settings)
         self.hk_quit = QLineEdit(self.settings.hotkey_quit)
+        self.hk_chatbot_toggle = QLineEdit(
+            getattr(self.settings, "hotkey_chatbot_toggle", "<ctrl>+<shift>+c")
+        )
+        self.hk_textviewer_toggle = QLineEdit(
+            getattr(self.settings, "hotkey_textviewer_toggle", "<ctrl>+<shift>+t")
+        )
         f.addRow("Answer (no context):", self.hk_answer_short)
         f.addRow("Answer (last 5 Q+A as context):", self.hk_answer_context)
-        f.addRow("Toggle overlay:", self.hk_toggle)
+        f.addRow("Toggle overlay (main):", self.hk_toggle)
         f.addRow("Clear buffer:", self.hk_clear)
         f.addRow("Open settings:", self.hk_settings)
         f.addRow("Quit app:", self.hk_quit)
+        f.addRow("Toggle chatbot window:", self.hk_chatbot_toggle)
+        f.addRow("Toggle text viewer window:", self.hk_textviewer_toggle)
         f.addRow(
             QLabel(
                 "<i>pynput syntax - e.g. <b>1</b>, <b>2</b>, &lt;ctrl&gt;+&lt;space&gt;, "
@@ -675,6 +683,8 @@ class SettingsDialog(QDialog):
         s.hotkey_clear = self.hk_clear.text().strip()
         s.hotkey_settings = self.hk_settings.text().strip()
         s.hotkey_quit = self.hk_quit.text().strip()
+        s.hotkey_chatbot_toggle = self.hk_chatbot_toggle.text().strip() or "<ctrl>+<shift>+c"
+        s.hotkey_textviewer_toggle = self.hk_textviewer_toggle.text().strip() or "<ctrl>+<shift>+t"
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())
