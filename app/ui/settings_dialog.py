@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,7 +31,30 @@ from .drop_text_edit import DropZoneTextEdit
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
-        super().__init__(parent)
+        # CRITICAL: pass parent=None to super().__init__, NOT the overlay.
+        #
+        # The overlay has Qt.WindowType.WindowStaysOnTopHint. On Windows,
+        # any child HWND of a topmost window inherits the topmost z-order
+        # at the OS level - regardless of which Qt flags we set on the
+        # child. Just clearing WindowStaysOnTopHint on the dialog isn't
+        # enough; Windows still places it above all non-topmost windows
+        # because its parent is topmost.
+        #
+        # Detaching by passing None makes the dialog a fully independent
+        # top-level window. Browsers, PDF readers, etc. can now cover it
+        # normally when the user clicks them. The `parent` argument is
+        # kept in the signature for API compatibility (callers still pass
+        # `parent=overlay`) but is intentionally ignored.
+        super().__init__(None)
+        # Reset window flags to a clean Dialog window (titlebar + close
+        # button, no inherited Frameless/StayOnTop from the overlay).
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
         self.settings = settings
         self.persona_store = PersonaStore()
         # First-time use: seed Default from whatever's currently in Settings
@@ -49,14 +73,19 @@ class SettingsDialog(QDialog):
         self._suppress_persona_signal = False
 
         self.setWindowTitle("cluely-killer - Settings")
-        self.resize(680, 620)
+        # Smart size: 560 wide x 640 tall.
+        # The AI Provider tab is the tallest (many rows) so 640px height
+        # avoids a scrollbar. 560px width is enough for all labels without
+        # the dialog feeling like a spreadsheet.
+        self.resize(560, 640)
+        self.setMaximumWidth(620)  # never wider than this
 
         tabs = QTabWidget()
         tabs.addTab(self._provider_tab(), "AI Provider")
         tabs.addTab(self._context_tab(), "Your Context")
         tabs.addTab(self._audio_tab(), "Audio / STT")
         tabs.addTab(self._hotkeys_tab(), "Hotkeys")
-        tabs.addTab(self._window_tab(), "Window")
+        tabs.addTab(self._display_tab(), "Display")
 
         save_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
@@ -81,20 +110,114 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
+        # ---- DeepSeek (the only LLM) ----
         self.deepseek_key = QLineEdit(self.settings.deepseek_api_key)
         self.deepseek_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.deepseek_model = QLineEdit(self.settings.deepseek_model)
         self.deepseek_base_url = QLineEdit(self.settings.deepseek_base_url)
+        info_lbl = QLabel(
+            "<b>DeepSeek (cloud LLM, ~$0.14/M tokens)</b>"
+            "<br><i>Key: <code>platform.deepseek.com/api_keys</code>. "
+            "Models: <code>deepseek-chat</code> (V3, fast) or "
+            "<code>deepseek-reasoner</code> (R1, deep reasoning).</i>"
+        )
+        info_lbl.setWordWrap(True)
+        f.addRow(info_lbl)
+        f.addRow("DeepSeek API key:", self.deepseek_key)
+        f.addRow("DeepSeek model:", self.deepseek_model)
+        f.addRow("DeepSeek base URL:", self.deepseek_base_url)
 
-        f.addRow(QLabel(
-            "<b>DeepSeek (cloud, OpenAI-compatible, ~$0.14/M tokens)</b>"
-            "<br><i>Get a key at <code>https://platform.deepseek.com/api_keys</code>. "
-            "Models: <code>deepseek-chat</code> (V3, fast - recommended) or "
-            "<code>deepseek-reasoner</code> (R1, slower / stronger reasoning).</i>"
-        ))
-        f.addRow("API key:", self.deepseek_key)
-        f.addRow("Model:", self.deepseek_model)
-        f.addRow("Base URL:", self.deepseek_base_url)
+        # Answer length = THE answer-SPEED lever. LLMs generate tokens
+        # one at a time, so a shorter answer streams faster. On a fast
+        # (GPU) STT setup the LLM is the bottleneck, so 'concise' is the
+        # difference between a ~4s and a ~1.5s answer.
+        self.brevity_combo = QComboBox()
+        for label, val in [
+            ("Brief — PRIMARY only, ultra-fast (screening, salary)", "brief"),
+            ("Concise — 2-4 sections, fast (default, most questions)", "concise"),
+            ("Detailed — 3-5 sections, thorough (technical drill-downs)", "detailed"),
+            ("Deep — 4-6 sections, full depth (system design, architecture)", "deep"),
+        ]:
+            self.brevity_combo.addItem(label, val)
+        bi = self.brevity_combo.findData(self.settings.answer_brevity)
+        self.brevity_combo.setCurrentIndex(bi if bi >= 0 else 1)
+        f.addRow("Answer depth:", self.brevity_combo)
+        _wl1 = QLabel(
+            "<i>Controls how much the model generates — not quality, just length. "
+            "<b>Brief</b> = fastest, PRIMARY sentence only. "
+            "<b>Deep</b> = full technical depth with trade-offs. "
+            "Switch mid-interview without restarting.</i>"
+        )
+        _wl1.setWordWrap(True)
+        f.addRow(_wl1)
+
+        # Interview mode: re-weights what every answer optimizes for to match
+        # the interviewer's true intent. Same format + same single LLM call.
+        # Each mode changes the internal priority block in the prompt but
+        # preserves the tagged section format and single-call architecture.
+        from ..prompts.builder import INTERVIEW_MODE_LABELS
+        self.mode_combo = QComboBox()
+        for val in ("balanced", "recruiter", "hiring_manager", "technical"):
+            self.mode_combo.addItem(INTERVIEW_MODE_LABELS[val], val)
+        mi = self.mode_combo.findData(self.settings.interview_mode)
+        self.mode_combo.setCurrentIndex(mi if mi >= 0 else 0)
+        f.addRow("Interview mode:", self.mode_combo)
+        _wlm = QLabel(
+            "<i>Tunes every answer to the interviewer's silent question.<br>"
+            "<b>Recruiter</b>: \"Can I move this candidate forward?\" — communication, confidence, business value.<br>"
+            "<b>Hiring Manager</b>: \"Can this person deliver?\" — ownership, execution, delivery.<br>"
+            "<b>Technical</b>: \"Does this person understand the tech?\" — depth, trade-offs, correctness.<br>"
+            "<b>Balanced</b>: auto-adapts to each question. Switch mid-interview.</i>"
+        )
+        _wlm.setWordWrap(True)
+        f.addRow(_wlm)
+
+        # Speculative pre-generation: start answering on the interviewer's
+        # pause, BEFORE the key press, so the answer appears instantly.
+        self.speculative_check = QCheckBox(
+            "Pre-generate answers on pause (instant replies)"
+        )
+        self.speculative_check.setChecked(self.settings.speculative_enabled)
+        f.addRow(self.speculative_check)
+        _wl2 = QLabel("<i>On pause, pre-generates the '1' answer in background. Press '1' and it's already done. Needs continuous transcription on.</i>")
+        _wl2.setWordWrap(True)
+        f.addRow(_wl2)
+
+        # RAG: inject only the resume parts relevant to each question
+        # (sharper answers + slightly faster) when the resume is large.
+        self.rag_check = QCheckBox(
+            "Smart resume retrieval (use only the relevant resume parts per question)"
+        )
+        self.rag_check.setChecked(self.settings.use_rag)
+        f.addRow(self.rag_check)
+
+        # Mode '2' memory style: compact brief vs full last-5 transcript.
+        self.context_mode_combo = QComboBox()
+        for label, val in [
+            ("Smart - compact summary of earlier Q&A (faster)", "smart"),
+            ("Full - replay the last 5 Q&A verbatim (most precise)", "full"),
+        ]:
+            self.context_mode_combo.addItem(label, val)
+        ci = self.context_mode_combo.findData(self.settings.context_mode)
+        self.context_mode_combo.setCurrentIndex(ci if ci >= 0 else 0)
+        f.addRow("Key '2' memory:", self.context_mode_combo)
+        _wl3 = QLabel("<i><b>Smart retrieval</b>: only the relevant resume parts per question.<br><b>Key '2' memory</b>: Smart = short digest; Full = last 5 Q&amp;A verbatim.</i>")
+        _wl3.setWordWrap(True)
+        f.addRow(_wl3)
+
+        # Semantic cache: reuse answers for repeated questions (instant).
+        self.semcache_check = QCheckBox(
+            "Reuse answers to repeated questions (instant, no LLM call)"
+        )
+        self.semcache_check.setChecked(self.settings.semantic_cache_enabled)
+        f.addRow(self.semcache_check)
+        _wl4 = QLabel("<i>Repeated questions answered <b>instantly</b> from cache. Clears when resume/JD changes.</i>")
+        _wl4.setWordWrap(True)
+        f.addRow(_wl4)
+
+        _wl5 = QLabel("<hr><i>Transcription: local Whisper model (offline). Configure on <b>Audio / STT</b> tab.</i>")
+        _wl5.setWordWrap(True)
+        f.addRow(_wl5)
         return w
 
     def _context_tab(self) -> QWidget:
@@ -132,9 +255,16 @@ class SettingsDialog(QDialog):
             "(e.g. 'Stripe Senior PM' / 'Junior Dev') with one click.</i>"
         ))
 
-        v.addWidget(QLabel("About me (1-3 sentences):"))
+        v.addWidget(QLabel(
+            "About me (2-4 sentences — who you are, your strongest fact, your role):"
+        ))
         self.about_edit = QTextEdit(self.settings.about_me)
         self.about_edit.setMaximumHeight(70)
+        self.about_edit.setPlaceholderText(
+            "e.g. I'm a senior backend engineer with 6 years building distributed systems. "
+            "I led the migration from monolith to microservices at Acme, cutting deploy time by 60%. "
+            "I'm applying for the Staff Engineer role on your platform team."
+        )
         v.addWidget(self.about_edit)
 
         # Resume row: label + Import button on the right.
@@ -170,9 +300,16 @@ class SettingsDialog(QDialog):
         self.job_edit.setMaximumHeight(120)
         v.addWidget(self.job_edit)
 
-        v.addWidget(QLabel("Custom system prompt (advanced - appended to base rules):"))
+        v.addWidget(QLabel(
+            "Custom instructions (optional — appended after base rules):"
+        ))
         self.custom_edit = QTextEdit(self.settings.custom_system_prompt)
         self.custom_edit.setMaximumHeight(80)
+        self.custom_edit.setPlaceholderText(
+            "Advanced: add extra constraints or context for the AI. "
+            "e.g. 'Always mention my open-source work on GitHub.' "
+            "Leave blank to use the default hiring-probability prompt."
+        )
         v.addWidget(self.custom_edit)
         return w
 
@@ -338,86 +475,220 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
 
-        # Whisper model is locked to 'small' - the model files are
-        # bundled inside the .exe folder and that's the only one
-        # available offline. Showing a dropdown that lets the user pick
-        # 'medium' or 'large-v3' would just trigger a 1-3 GB download
-        # attempt that fails because we're locked offline.
-        self.whisper_model_label = QLabel(f"<code>{self.settings.whisper_model}</code> (bundled, offline-only)")
+        # Model selector. large-v3-turbo = best accuracy; small/base =
+        # much faster on CPU (3-4x) at some accuracy cost. Each requires
+        # the matching model folder bundled next to the .exe
+        # (models/whisper-<name>/). Changing this needs a restart.
+        self.model_combo = QComboBox()
+        for label, val in [
+            ("large-v3-turbo (best accuracy)", "large-v3-turbo"),
+            ("small (3-4x faster on CPU)", "small"),
+            ("base (fastest on CPU)", "base"),
+        ]:
+            self.model_combo.addItem(label, val)
+        mi = self.model_combo.findData(self.settings.whisper_model)
+        if mi < 0:
+            # Unknown/custom model name - add it so it's not lost.
+            self.model_combo.addItem(f"{self.settings.whisper_model} (custom)", self.settings.whisper_model)
+            mi = self.model_combo.count() - 1
+        self.model_combo.setCurrentIndex(mi)
 
+        # Device selector. Auto = GPU if present else CPU. This is THE
+        # speed lever: GPU transcribes large-v3-turbo in well under 1s.
+        self.device_combo = QComboBox()
+        for label, val in [
+            ("Auto (GPU if available, else CPU)", "auto"),
+            ("GPU (CUDA)", "cuda"),
+            ("CPU", "cpu"),
+        ]:
+            self.device_combo.addItem(label, val)
+        di = self.device_combo.findData(self.settings.whisper_device)
+        self.device_combo.setCurrentIndex(di if di >= 0 else 0)
+
+        # CTranslate2 worker threads (CPU mode only). Higher = faster
+        # local STT on a multi-core CPU. 0 = auto (all cores minus one).
+        import os as _os
+        self.cpu_threads_spin = QDoubleSpinBox()
+        self.cpu_threads_spin.setDecimals(0)
+        self.cpu_threads_spin.setRange(0, float(max(2, (_os.cpu_count() or 8))))
+        self.cpu_threads_spin.setSingleStep(1)
+        self.cpu_threads_spin.setValue(float(self.settings.whisper_cpu_threads))
+
+        # First-press fallback window. Only used on the very first
+        # answer of a session, before the since-last-press marker has
+        # been set. After that, every press uses the marker-based
+        # capture (capped at "Max capture" below).
         self.window_spin = QDoubleSpinBox()
         self.window_spin.setRange(5.0, 60.0)
         self.window_spin.setSingleStep(1.0)
         self.window_spin.setValue(self.settings.answer_window_seconds)
 
-        f.addRow("Whisper model:", self.whisper_model_label)
-        f.addRow("Audio window (sec):", self.window_spin)
+        # Hard ceiling on since-last-press audio.
+        self.max_capture_spin = QDoubleSpinBox()
+        self.max_capture_spin.setRange(15.0, 600.0)
+        self.max_capture_spin.setSingleStep(5.0)
+        self.max_capture_spin.setValue(self.settings.max_capture_seconds)
+
+        # Continuous STT toggle. When on, a background thread transcribes
+        # as the interviewer talks so the press path is just the LLM call.
+        self.continuous_check = QCheckBox(
+            "Continuous transcription (background, near-instant answers)"
+        )
+        self.continuous_check.setChecked(self.settings.continuous_stt)
+
+        # Keyword biasing toggle. Helps recognize names/jargon but can
+        # leak the glossary into transcripts on quiet audio.
+        self.bias_check = QCheckBox(
+            "Bias transcription toward my resume/JD keywords"
+        )
+        self.bias_check.setChecked(self.settings.stt_bias_enabled)
+
+        # Audio preprocessing toggle (roadmap #6): clean the signal
+        # before Whisper (high-pass + denoise + gain).
+        self.preprocess_check = QCheckBox(
+            "Clean audio before transcription (rumble removal + denoise + gain)"
+        )
+        self.preprocess_check.setChecked(self.settings.audio_preprocess)
+
+        f.addRow("Whisper model:", self.model_combo)
+        f.addRow("Device:", self.device_combo)
+        f.addRow("CPU threads (0 = auto):", self.cpu_threads_spin)
+        f.addRow("First-press window (sec):", self.window_spin)
+        f.addRow("Max capture per press (sec):", self.max_capture_spin)
+        f.addRow(self.continuous_check)
+        f.addRow(self.bias_check)
+        f.addRow(self.preprocess_check)
         f.addRow(QLabel(
-            "<i>Whisper is bundled offline. No downloads, ever.</i>"
+            "<i><b>Device = GPU</b> is the big speed win: it transcribes "
+            "large-v3-turbo in well under a second. Needs an NVIDIA GPU + the "
+            "CUDA/cuDNN runtime DLLs. If GPU init fails, the app falls back to "
+            "CPU automatically.<br><br>"
+            "<b>No GPU?</b> Switch <b>Whisper model</b> to <b>small</b> or "
+            "<b>base</b> - 3-4x faster than turbo on CPU.<br><br>"
+            "<b>Changing model or device requires an app restart.</b> Other "
+            "options apply immediately.<br><br>"
+            "On each press, only the interviewer's <b>last question</b> is "
+            "transcribed (not the whole window). Each press of '1' or '2' covers "
+            "everything said since the previous press, capped at <b>Max capture</b>.</i>"
         ))
         return w
 
     def _hotkeys_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
-        self.hk_answer = QLineEdit(self.settings.hotkey_answer)
+        self.hk_answer_short = QLineEdit(self.settings.hotkey_answer_short)
+        self.hk_answer_context = QLineEdit(self.settings.hotkey_answer_context)
         self.hk_toggle = QLineEdit(self.settings.hotkey_toggle)
         self.hk_clear = QLineEdit(self.settings.hotkey_clear)
         self.hk_settings = QLineEdit(self.settings.hotkey_settings)
         self.hk_quit = QLineEdit(self.settings.hotkey_quit)
-        f.addRow("Answer:", self.hk_answer)
-        f.addRow("Toggle overlay:", self.hk_toggle)
+        self.hk_chatbot_toggle = QLineEdit(
+            getattr(self.settings, "hotkey_chatbot_toggle", "<ctrl>+<shift>+c")
+        )
+        self.hk_textviewer_toggle = QLineEdit(
+            getattr(self.settings, "hotkey_textviewer_toggle", "<ctrl>+<shift>+t")
+        )
+        f.addRow("Answer (no context):", self.hk_answer_short)
+        f.addRow("Answer (last 5 Q+A as context):", self.hk_answer_context)
+        f.addRow("Toggle overlay (main):", self.hk_toggle)
         f.addRow("Clear buffer:", self.hk_clear)
         f.addRow("Open settings:", self.hk_settings)
         f.addRow("Quit app:", self.hk_quit)
+        f.addRow("Toggle chatbot window:", self.hk_chatbot_toggle)
+        f.addRow("Toggle text viewer window:", self.hk_textviewer_toggle)
         f.addRow(
             QLabel(
-                "<i>pynput syntax — e.g. &lt;ctrl&gt;+&lt;space&gt;, "
-                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a</i>"
+                "<i>pynput syntax - e.g. <b>1</b>, <b>2</b>, &lt;ctrl&gt;+&lt;space&gt;, "
+                "&lt;ctrl&gt;+&lt;shift&gt;+s, &lt;alt&gt;+a.<br>"
+                "Bare digits like <b>1</b> / <b>2</b> are <i>global</i>: while the app "
+                "is running they will be intercepted everywhere on the OS, so don't "
+                "set them to keys you also need for typing.</i>"
             )
         )
         return w
 
-    def _window_tab(self) -> QWidget:
+    def _display_tab(self) -> QWidget:
+        """Compact Display tab: stealth + opacity + live transcription toggle."""
         w = QWidget()
         f = QFormLayout(w)
-        self.exclude_check = QCheckBox("Hide window from screen capture (Windows 10 build 19041+)")
-        self.exclude_check.setChecked(self.settings.exclude_from_capture)
+        f.setVerticalSpacing(10)
 
+        # Stealth / screen capture
+        self.exclude_check = QCheckBox(
+            "Hide overlay from screen capture (Windows 10 build 19041+)"
+        )
+        self.exclude_check.setChecked(self.settings.exclude_from_capture)
+        f.addRow(self.exclude_check)
+
+        # Opacity
         self.opacity_spin = QDoubleSpinBox()
         self.opacity_spin.setRange(0.4, 1.0)
         self.opacity_spin.setSingleStep(0.05)
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setValue(self.settings.opacity)
-
-        f.addRow(self.exclude_check)
         f.addRow("Opacity:", self.opacity_spin)
+
+        # Live transcription
+        self.live_transcript_check = QCheckBox(
+            "Show live transcription in overlay (same size as answer text)"
+        )
+        self.live_transcript_check.setChecked(
+            getattr(self.settings, "live_transcription_enabled", True)
+        )
+        f.addRow(self.live_transcript_check)
+        f.addRow(QLabel(
+            "<i>When on, the interviewer's speech is transcribed and displayed "
+            "in real-time so you can read along without listening. "
+            "Updates as each Whisper segment arrives.</i>"
+        ))
         return w
 
     # ------------------------------------------------------------------
     def _save(self) -> None:
         s = self.settings
+
+        # DeepSeek (the only LLM provider)
         s.deepseek_api_key = self.deepseek_key.text().strip()
         s.deepseek_model = self.deepseek_model.text().strip() or "deepseek-chat"
         s.deepseek_base_url = self.deepseek_base_url.text().strip() or "https://api.deepseek.com/v1"
+        s.answer_brevity = self.brevity_combo.currentData() or "concise"
+        s.interview_mode = self.mode_combo.currentData() or "balanced"
+        s.speculative_enabled = self.speculative_check.isChecked()
+        s.use_rag = self.rag_check.isChecked()
+        s.context_mode = self.context_mode_combo.currentData() or "smart"
+        s.semantic_cache_enabled = self.semcache_check.isChecked()
 
         s.about_me = self.about_edit.toPlainText()
         s.resume_text = self.resume_edit.toPlainText()
         s.job_description = self.job_edit.toPlainText()
         s.custom_system_prompt = self.custom_edit.toPlainText()
 
-        # Whisper model is hard-pinned to 'small' (bundled). Don't let
-        # anyone overwrite it from the UI.
+        s.whisper_model = self.model_combo.currentData() or "large-v3-turbo"
+        s.whisper_device = self.device_combo.currentData() or "auto"
+        s.whisper_cpu_threads = int(self.cpu_threads_spin.value())
         s.answer_window_seconds = float(self.window_spin.value())
+        s.max_capture_seconds = float(self.max_capture_spin.value())
+        s.continuous_stt = self.continuous_check.isChecked()
+        s.stt_bias_enabled = self.bias_check.isChecked()
+        s.audio_preprocess = self.preprocess_check.isChecked()
+        # buffer_seconds must always exceed max_capture_seconds. Bump
+        # it here so the Audio tab can't get persisted into a state
+        # where the next app start would silently drop audio.
+        if s.buffer_seconds < s.max_capture_seconds + 5:
+            s.buffer_seconds = s.max_capture_seconds + 10
 
-        s.hotkey_answer = self.hk_answer.text().strip()
+        s.hotkey_answer_short = self.hk_answer_short.text().strip() or "1"
+        s.hotkey_answer_context = self.hk_answer_context.text().strip() or "2"
         s.hotkey_toggle = self.hk_toggle.text().strip()
         s.hotkey_clear = self.hk_clear.text().strip()
         s.hotkey_settings = self.hk_settings.text().strip()
         s.hotkey_quit = self.hk_quit.text().strip()
+        s.hotkey_chatbot_toggle = self.hk_chatbot_toggle.text().strip() or "<ctrl>+<shift>+c"
+        s.hotkey_textviewer_toggle = self.hk_textviewer_toggle.text().strip() or "<ctrl>+<shift>+t"
 
         s.exclude_from_capture = self.exclude_check.isChecked()
         s.opacity = float(self.opacity_spin.value())
+        s.live_transcription_enabled = self.live_transcript_check.isChecked()
 
         # Sync the active persona with whatever's now in the boxes so
         # personas always reflect what the user just committed.

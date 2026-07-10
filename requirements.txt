@@ -8,9 +8,9 @@ faster-whisper>=1.0.0
 soundcard>=0.4.3
 numpy>=1.24.0
 
-# --- LLM providers ---
-groq>=0.11.0           # cloud (free tier, blazing fast)
-ollama>=0.3.0          # local model client
+# --- LLM provider (DeepSeek, OpenAI-compatible streaming) ---
+# httpx is used directly for streaming chat completions.
+httpx>=0.27.0
 
 # --- Global hotkeys ---
 pynput>=1.7.6

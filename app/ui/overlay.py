@@ -3,20 +3,25 @@
 Renders the LLM stream as it arrives. Two highlight conventions are
 recognized:
 
-  ==word==   -> RED   (most stressed keywords, 2-3 per sentence)
-  **word**   -> YELLOW (softer secondary emphasis, sparing)
+  ==word==   -> RED   (most stressed keywords: technologies, metrics, outcomes)
+  **word**   -> YELLOW (softer secondary emphasis — use sparingly)
 
-The header carries a STEALTH / VISIBLE badge so the candidate can verify
-at a glance that the overlay is hidden from screen capture before
-starting the interview, plus a small "mem N" badge showing how many
-prior Q+A turns the LLM is remembering.
+The header carries:
+  - STEALTH / VISIBLE badge (hidden from screen capture status)
+  - Interview mode badge (BALANCED / RECRUITER / HM / TECHNICAL)
+  - Question type badge (auto-classified)
+  - Filler word / clarity badge
+
+The PRIMARY section is rendered with maximum visual emphasis: gold
+background tint, larger font, bold — it is the one self-complete sentence
+the candidate must speak first.
 """
 from __future__ import annotations
 
 import re
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
@@ -26,20 +31,153 @@ from PyQt6.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 from ..config import Settings
 from ..core.controller import Controller
+from ..core.analysis import FillerReport, ClassificationResult
+from ..prompts.builder import SECTION_TAGS, ALL_TAGS, INTERVIEW_MODE_SHORT
 from .styles import APP_QSS
 
-# Order matters: parse ==red== BEFORE **bold** so the regexes don't fight
-# over '=' / '*' boundaries on partial streams.
-_RED_RE = re.compile(r"==(.+?)==", flags=re.DOTALL)
+# ── Inline highlight regexes ───────────────────────────────────────────────
+_RED_RE  = re.compile(r"==(.+?)==",     flags=re.DOTALL)
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", flags=re.DOTALL)
+_RED_STYLE  = 'color:#FF6B6B;font-weight:700;'
+_BOLD_STYLE = 'color:#FFD166;font-weight:700;'
 
-_RED_STYLE = 'color:#FF6B6B;font-weight:700;'
+# ── Section tag parser ─────────────────────────────────────────────────────
+# Matches lines like:  [POINT] some text   or   [S] some text
+_TAG_LINE_RE = re.compile(
+    r'^\s*\[(' + '|'.join(re.escape(t) for t in ALL_TAGS) + r')\]\s*(.*)',
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
+def _inline_highlights(text: str) -> str:
+    """Apply ==red== and **yellow** inline highlights to a text fragment."""
+    text = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+    text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
+    text = _BOLD_RE.sub(rf'<span style="{_BOLD_STYLE}">\1</span>', text)
+    return text
+
+
+def _section_to_html(tag: str, body: str) -> str:
+    """Render one tagged section as a visually distinct HTML block.
+
+    The [PRIMARY] section receives the strongest visual treatment:
+    gold background tint, larger font, heavier border, bold weight.
+    It is the one self-complete sentence the candidate speaks first —
+    if interrupted after it, the answer still sounds finished.
+
+    All other sections are rendered as colored side-bordered blocks
+    with a label pill, sized for comfortable glancing while speaking.
+    """
+    tag_upper = tag.upper()
+    label, color = SECTION_TAGS.get(tag_upper, (tag_upper, "#7CC8FF"))
+
+    if tag_upper == "PRIMARY":
+        pill = (
+            f'<span style="'
+            f'color:#1a1a1a;'
+            f'font-size:10px;font-weight:900;letter-spacing:1.5px;'
+            f'background:{color};'
+            f'border-radius:4px;padding:3px 10px;">'
+            f'{label}</span>'
+        )
+        body_html = _inline_highlights(body.strip())
+        return (
+            f'<div style="'
+            f'margin:0 0 14px 0;'
+            f'padding:12px 14px 13px 14px;'
+            f'border-left:6px solid {color};'
+            f'background:rgba(255,209,102,0.14);'
+            f'border-radius:0 6px 6px 0;'
+            f'box-shadow:0 2px 8px rgba(255,209,102,0.08);">'
+            f'{pill}&nbsp;&nbsp;'
+            f'<span style="color:#ffffff;font-size:18px;font-weight:700;'
+            f'line-height:1.5;letter-spacing:0.1px;">{body_html}</span>'
+            f'</div>'
+        )
+
+    pill = (
+        f'<span style="'
+        f'color:{color};'
+        f'font-size:9px;font-weight:800;letter-spacing:0.8px;'
+        f'background:rgba(255,255,255,0.07);'
+        f'border-radius:3px;padding:1px 6px;'
+        f'border-left:2px solid {color};">'
+        f'{label}</span>'
+    )
+    body_html = _inline_highlights(body.strip())
+    return (
+        f'<div style="'
+        f'margin:0 0 9px 0;'
+        f'padding:7px 10px 7px 10px;'
+        f'border-left:3px solid {color};'
+        f'background:rgba(255,255,255,0.04);'
+        f'border-radius:0 4px 4px 0;">'
+        f'{pill}&nbsp;&nbsp;'
+        f'<span style="color:#f1f3f5;font-size:14px;line-height:1.55;">{body_html}</span>'
+        f'</div>'
+    )
+
+
+def _answer_to_html(text: str) -> str:
+    """Convert a full answer (possibly mid-stream) to structured HTML.
+
+    Lines matching [TAG] are rendered as colored section blocks.
+    Any leading prose before the first tag is rendered as plain text
+    so the display is never blank during early streaming.
+    """
+    if not text:
+        return ""
+
+    matches = list(_TAG_LINE_RE.finditer(text))
+
+    if not matches:
+        # No tags yet (streaming hasn't produced one) — render as plain text
+        plain = _inline_highlights(text.strip())
+        return (
+            f'<div style="color:#f1f3f5;font-size:14px;'
+            f'padding:4px 2px;line-height:1.55;">'
+            f'{plain}</div>'
+        )
+
+    html_parts: list[str] = []
+
+    # Any text before the first tag
+    pre = text[:matches[0].start()].strip()
+    if pre:
+        html_parts.append(
+            f'<div style="color:#9aa3b2;font-size:13px;'
+            f'padding:2px 4px 6px 4px;">'
+            f'{_inline_highlights(pre)}</div>'
+        )
+
+    for i, m in enumerate(matches):
+        tag = m.group(1).upper()
+        # group(2) = text on the SAME line as the tag (e.g. "[S] text here")
+        inline = m.group(2).strip()
+        # Also grab any continuation lines between this tag and the next
+        # (in case DeepSeek wraps a long sentence onto a second line)
+        if i + 1 < len(matches):
+            continuation = text[m.end():matches[i + 1].start()].strip()
+        else:
+            continuation = text[m.end():].strip()
+        # Combine: inline text first, then any continuation
+        body = (inline + (" " + continuation if continuation else "")).strip()
+        # Always render the section block (even if body is empty mid-stream)
+        html_parts.append(_section_to_html(tag, body))
+
+    return "".join(html_parts)
+
+
+# Legacy alias — used by live transcript panel (plain text, no section tags)
 def _md_to_html(text: str) -> str:
     text = (
         text.replace("&", "&amp;")
@@ -47,7 +185,7 @@ def _md_to_html(text: str) -> str:
         .replace(">", "&gt;")
     )
     text = _RED_RE.sub(rf'<span style="{_RED_STYLE}">\1</span>', text)
-    text = _BOLD_RE.sub(r"<b>\1</b>", text)
+    text = _BOLD_RE.sub(rf'<span style="{_BOLD_STYLE}">\1</span>', text)
     return text.replace("\n", "<br>")
 
 
@@ -68,11 +206,15 @@ class OverlayWindow(QWidget):
         self.simple_mode = simple_mode
         self._answer_text = ""
         self._drag_offset = None
+        self._user_scrolled_down = False  # tracks if user scrolled down during streaming
+        # Accumulated live transcript text (rolling window of last ~800 chars)
+        self._live_transcript_text = ""
 
         self._setup_window()
         self._build_ui()
         self._wire_signals()
         self.update_stealth_badge(settings.exclude_from_capture)
+        self.update_mode_badge(getattr(settings, "interview_mode", "balanced"))
 
     # ------------------------------------------------------------------
     def _setup_window(self) -> None:
@@ -86,10 +228,11 @@ class OverlayWindow(QWidget):
                 | Qt.WindowType.WindowStaysOnTopHint
             )
         self.setWindowOpacity(self.settings.opacity)
-        self.setMinimumSize(420, 240)
+        # Taller minimum so long answers are always fully visible.
+        self.setMinimumSize(420, 520)
         self.resize(
             max(self.settings.window_w, 420),
-            max(self.settings.window_h, 240),
+            max(self.settings.window_h, 600),
         )
 
     def place_on_screen(self) -> None:
@@ -146,10 +289,36 @@ class OverlayWindow(QWidget):
         self.status_label.setObjectName("status")
         header.addWidget(self.status_label)
 
-        self.mem_label = QLabel("mem 0")
-        self.mem_label.setObjectName("memBadge")
-        self.mem_label.setToolTip("Conversation memory: number of prior Q+A turns the LLM remembers")
-        header.addWidget(self.mem_label)
+        # Interview mode badge: shows the active interview mode.
+        self.mode_label = QLabel("")
+        self.mode_label.setObjectName("modeBadge")
+        self.mode_label.setToolTip(
+            "Active interview mode. Change in Settings → Answer Quality."
+        )
+        self.mode_label.setVisible(True)
+        header.addWidget(self.mode_label)
+
+        # Question type badge: shows auto-classified type of last question.
+        self.qtype_label = QLabel("")
+        self.qtype_label.setObjectName("qtypeBadge")
+        self.qtype_label.setToolTip("Auto-detected question type and recommended depth")
+        self.qtype_label.setVisible(False)
+        header.addWidget(self.qtype_label)
+
+        # Filler word / confidence badge: shows clarity score of last question.
+        self.filler_label = QLabel("")
+        self.filler_label.setObjectName("fillerBadge")
+        self.filler_label.setToolTip("Interviewer speech clarity (filler word count)")
+        self.filler_label.setVisible(False)
+        header.addWidget(self.filler_label)
+
+        # Hidden labels kept for internal signal wiring but not shown in UI.
+        # mem and backend info is available via status_label tooltip.
+        self.mem_label = QLabel("")
+        self.mem_label.setVisible(False)
+        self.backend_label = QLabel("")
+        self.backend_label.setProperty("alarm", "false")
+        self.backend_label.setVisible(False)
 
         header.addStretch()
 
@@ -182,12 +351,32 @@ class OverlayWindow(QWidget):
 
         v.addLayout(header)
 
-        # --- Question / transcript ---
-        self.question_label = QLabel("Press Ctrl+Space to answer the last question.")
+        # --- Question / transcript (last confirmed question) ---
+        self.question_label = QLabel(
+            "Press '1' for a quick answer to the last thing said, "
+            "or '2' to also use the last 5 Q+A as context."
+        )
         self.question_label.setObjectName("question")
         self.question_label.setWordWrap(True)
-        self.question_label.setMaximumHeight(60)
+        self.question_label.setMaximumHeight(50)
         v.addWidget(self.question_label)
+
+        # --- Live transcription panel (optional, same font size as answer) ---
+        self._live_transcript_header = QLabel("LIVE")
+        self._live_transcript_header.setObjectName("liveTranscriptLabel")
+        self._live_transcript_view = QTextBrowser()
+        self._live_transcript_view.setObjectName("liveTranscript")
+        self._live_transcript_view.setOpenExternalLinks(False)
+        self._live_transcript_view.setFrameShape(QFrame.Shape.NoFrame)
+        # Allow up to ~5 lines (~110px) so longer sentences are readable.
+        self._live_transcript_view.setMaximumHeight(110)
+        self._live_transcript_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        v.addWidget(self._live_transcript_header)
+        v.addWidget(self._live_transcript_view, stretch=0)
+        # Show/hide based on setting
+        self._apply_live_transcript_visibility()
 
         # --- Answer ---
         self.answer_view = QTextBrowser()
@@ -204,10 +393,13 @@ class OverlayWindow(QWidget):
         self.setStyleSheet(APP_QSS)
 
     def _footer_text(self) -> str:
+        rephrase_key = getattr(self.settings, "hotkey_rephrase", "3")
         return (
-            f"{self.settings.hotkey_answer} answer  \u00b7  "
+            f"{self.settings.hotkey_answer_short} answer  \u00b7  "
+            f"{self.settings.hotkey_answer_context} answer+context  \u00b7  "
+            f"{rephrase_key} rephrase  \u00b7  "
             f"{self.settings.hotkey_toggle} hide  \u00b7  "
-            f"{self.settings.hotkey_clear} clear+forget  \u00b7  "
+            f"{self.settings.hotkey_clear} clear  \u00b7  "
             f"{self.settings.hotkey_settings} settings"
         )
 
@@ -232,7 +424,47 @@ class OverlayWindow(QWidget):
         self.stealth_label.style().unpolish(self.stealth_label)
         self.stealth_label.style().polish(self.stealth_label)
 
+    def update_mode_badge(self, mode: str) -> None:
+        """Update the interview mode badge in the header."""
+        short = INTERVIEW_MODE_SHORT.get(mode, mode.upper())
+        self.mode_label.setText(short)
+        mode_tips = {
+            "balanced":       "Balanced — adapts to each question automatically",
+            "recruiter":      "Recruiter mode — optimizing for communication, confidence, business value",
+            "hiring_manager": "Hiring Manager mode — optimizing for ownership, execution, delivery",
+            "technical":      "Technical mode — optimizing for engineering depth, architecture, trade-offs",
+        }
+        self.mode_label.setToolTip(mode_tips.get(mode, f"Interview mode: {mode}"))
+        # Color the badge by mode
+        mode_colors = {
+            "balanced":       ("#c8ced9", "rgba(200,206,217,20)", "rgba(200,206,217,55)"),
+            "recruiter":      ("#7CC8FF", "rgba(124,200,255,20)", "rgba(124,200,255,55)"),
+            "hiring_manager": ("#FF9F43", "rgba(255,159,67,20)",  "rgba(255,159,67,55)"),
+            "technical":      ("#a78bfa", "rgba(167,139,250,20)", "rgba(167,139,250,55)"),
+        }
+        fg, bg, border = mode_colors.get(mode, mode_colors["balanced"])
+        self.mode_label.setStyleSheet(
+            f"color:{fg};"
+            f"background-color:{bg};"
+            f"font-size:9px;font-weight:700;letter-spacing:0.5px;"
+            f"padding:2px 7px;border-radius:8px;"
+            f"border:1px solid {border};"
+        )
+
     # ------------------------------------------------------------------
+    def _apply_live_transcript_visibility(self) -> None:
+        """Show or hide the live transcript panel based on settings."""
+        enabled = getattr(self.settings, "live_transcription_enabled", True)
+        self._live_transcript_header.setVisible(enabled)
+        self._live_transcript_view.setVisible(enabled)
+
+    def refresh_live_transcript_setting(self) -> None:
+        """Called after settings save to apply the live transcription toggle."""
+        self._apply_live_transcript_visibility()
+        if not getattr(self.settings, "live_transcription_enabled", True):
+            self._live_transcript_text = ""
+            self._live_transcript_view.setHtml("")
+
     def _wire_signals(self) -> None:
         c = self.controller
         c.transcript_ready.connect(self._on_transcript)
@@ -242,25 +474,68 @@ class OverlayWindow(QWidget):
         c.error.connect(self._on_error)
         c.status.connect(self._on_status)
         c.history_changed.connect(self._on_history_changed)
+        c.backend_used.connect(self._on_backend_used)
+        c.live_transcript_segment.connect(self._on_live_segment)
+        c.filler_report.connect(self._on_filler_report)
+        c.question_classified.connect(self._on_question_classified)
+
+    @pyqtSlot(str)
+    def _on_live_segment(self, text: str) -> None:
+        """Append a new Whisper segment to the live transcript display.
+        NEVER clears - text accumulates permanently so the user can always
+        read back what was said. A rolling 800-char window keeps the panel
+        from growing unbounded while preserving recent context.
+        """
+        if not getattr(self.settings, "live_transcription_enabled", True):
+            return
+        self._live_transcript_text += (" " if self._live_transcript_text else "") + text.strip()
+        # Rolling window: keep only the last 800 chars so the panel
+        # stays readable but never loses recent speech.
+        if len(self._live_transcript_text) > 800:
+            self._live_transcript_text = "\u2026 " + self._live_transcript_text[-760:]
+        self._live_transcript_view.setHtml(
+            f'<span style="color:#c8ced9;font-size:14px;">{self._live_transcript_text}</span>'
+        )
+        cursor = self._live_transcript_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._live_transcript_view.setTextCursor(cursor)
 
     @pyqtSlot(str)
     def _on_transcript(self, text: str) -> None:
-        display = text if len(text) <= 220 else "..." + text[-220:]
+        """Called when a full answer-ready transcript is confirmed.
+        Does NOT clear the live panel - the user can keep reading the
+        accumulated transcript. Just updates the confirmed Q label.
+        """
+        display = text if len(text) <= 220 else "\u2026" + text[-220:]
         self.question_label.setText(f"Q: {display}")
 
     @pyqtSlot()
     def _on_answer_start(self) -> None:
         self._answer_text = ""
+        self._user_scrolled_down = False  # reset: user hasn't scrolled yet
         self.answer_view.setHtml("")
         self.status_label.setText("Answering...")
+        # Pin to top immediately.
+        self.answer_view.verticalScrollBar().setValue(0)
 
     @pyqtSlot(str)
     def _on_answer_chunk(self, chunk: str) -> None:
         self._answer_text += chunk
-        self.answer_view.setHtml(_md_to_html(self._answer_text))
-        cursor = self.answer_view.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.answer_view.setTextCursor(cursor)
+        # Snapshot scroll state BEFORE setHtml() wipes it.
+        sb = self.answer_view.verticalScrollBar()
+        # If the user has scrolled down at all, track that intent.
+        if sb.value() > 4:
+            self._user_scrolled_down = True
+        self.answer_view.setHtml(_answer_to_html(self._answer_text))
+        # setHtml() always resets the scrollbar to 0 internally.
+        # We use a zero-delay timer so Qt finishes layout BEFORE we
+        # restore the position - otherwise maximum() is still 0.
+        if self._user_scrolled_down:
+            # User scrolled down intentionally: follow the bottom.
+            QTimer.singleShot(0, lambda: self.answer_view.verticalScrollBar().setValue(
+                self.answer_view.verticalScrollBar().maximum()
+            ))
+        # else: leave at 0 (top) - first line stays visible.
 
     @pyqtSlot()
     def _on_answer_finished(self) -> None:
@@ -277,6 +552,64 @@ class OverlayWindow(QWidget):
     @pyqtSlot(int)
     def _on_history_changed(self, n: int) -> None:
         self.mem_label.setText(f"mem {n}")
+
+    @pyqtSlot(str, str, bool)
+    def _on_backend_used(self, stt_label: str, llm_label: str, fell_back: bool) -> None:
+        # Compact ground-truth readout, e.g. "local (continuous) | DeepSeek".
+        self.backend_label.setText(f"{stt_label}  |  {llm_label}")
+        self.backend_label.setToolTip(
+            f"Engines for the last answer:\n  STT: {stt_label}\n  LLM: {llm_label}"
+        )
+        self.backend_label.setProperty("alarm", "true" if fell_back else "false")
+        self.backend_label.style().unpolish(self.backend_label)
+        self.backend_label.style().polish(self.backend_label)
+
+    @pyqtSlot(object)
+    def _on_filler_report(self, report: FillerReport) -> None:
+        """Show the filler word / confidence badge after each answer."""
+        score = report.confidence_score
+        if score >= 90:
+            color = "#4CAF50"  # green - very clear
+            icon = "Clear"
+        elif score >= 70:
+            color = "#FFC107"  # amber - some fillers
+            icon = report.label
+        else:
+            color = "#FF6B6B"  # red - many fillers
+            icon = report.label
+        self.filler_label.setText(icon)
+        self.filler_label.setStyleSheet(
+            f"color:{color};font-size:9px;font-weight:600;"
+            "background:rgba(255,255,255,0.06);border-radius:3px;"
+            "padding:1px 4px;"
+        )
+        tip_lines = [f"Clarity score: {score}/100"]
+        if report.per_filler:
+            tip_lines.append("Filler words detected:")
+            for word, cnt in sorted(report.per_filler.items(), key=lambda x: -x[1]):
+                tip_lines.append(f"  '{word}': {cnt}x")
+        else:
+            tip_lines.append("No filler words - very clear speech.")
+        self.filler_label.setToolTip("\n".join(tip_lines))
+        self.filler_label.setVisible(True)
+
+    @pyqtSlot(object)
+    def _on_question_classified(self, result: ClassificationResult) -> None:
+        """Show the question type badge and depth hint after classification."""
+        self.qtype_label.setText(result.display_label)
+        tip = f"Type: {result.question_type}\nRecommended depth: {result.recommended_brevity}"
+        if result.depth_hint:
+            tip += f"\nTip: {result.depth_hint}"
+        self.qtype_label.setToolTip(tip)
+        self.qtype_label.setVisible(True)
+        # Show the depth hint briefly in the status bar.
+        if result.depth_hint:
+            self.status_label.setText(result.depth_hint)
+            QTimer.singleShot(3500, lambda: self.status_label.setText("Answering..."))
+
+    def refresh_mode_badge(self) -> None:
+        """Called after settings save to update the mode badge."""
+        self.update_mode_badge(getattr(self.settings, "interview_mode", "balanced"))
 
     # ------------------------------------------------------------------
     # Custom drag (only meaningful in frameless mode; harmless otherwise)
